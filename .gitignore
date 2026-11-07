@@ -11,3 +11,6 @@ __pycache__/
 # Vivado scratch that appears if a tool is started from the repo root
 /.Xil/
 /NA/
+
+# loose build logs written next to the workspace folders
+/workspace/*.log

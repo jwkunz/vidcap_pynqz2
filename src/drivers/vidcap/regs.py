@@ -17,6 +17,7 @@ BASES = {
     "ovl":       0x4006_0000,   # vc_overlay        (HLS)
     "snap":      0x4007_0000,   # vc_snapshot       (HLS)
     "intc":      0x4008_0000,   # AXI interrupt controller
+    "tavg":      0x4009_0000,   # vc_tavg           temporal average over the last N frames (HLS)
 }
 WINDOW = 0x1_0000
 
@@ -46,15 +47,23 @@ VMUX_ID, VMUX_SEL, VMUX_STATUS, VMUX_FRAMES = 0x00, 0x04, 0x08, 0x0C
 VMUX_MAGIC = 0x4D55_5801
 
 # ---- vc_filter (HLS, offsets from the generated xvc_filter_hw.h) -----------------------------
-FILT_MODE, FILT_THRESHOLD = 0x10, 0x18
+FILT_MODE, FILT_THRESHOLD, FILT_NOISE = 0x10, 0x18, 0x20
 FILTER_MODES = {"passthrough": 0, "invert": 1, "grayscale": 2, "threshold": 3,
-                "sobel": 4, "blur": 5, "sharpen": 6}
+                "sobel": 4, "blur": 5, "sharpen": 6, "noise": 7}
 
 # ---- vc_overlay (HLS, from xvc_overlay_hw.h) -------------------------------------------------
 OVL_ENABLE, OVL_SCALE, OVL_MARGIN, OVL_FG, OVL_BG, OVL_BG_EN = 0x10, 0x18, 0x20, 0x28, 0x30, 0x38
 
 # ---- vc_snapshot (HLS, from xvc_snapshot_hw.h) -----------------------------------------------
 SNAP_MEM_LO, SNAP_MEM_HI, SNAP_TRIGGER, SNAP_ACK, SNAP_STATUS = 0x10, 0x14, 0x1C, 0x24, 0x2C
+
+# ---- vc_tavg (HLS, from xvc_tavg_hw.h) --------------------------------------------------------
+TAVG_MEM_R_LO, TAVG_MEM_R_HI = 0x10, 0x14          # buffer base address, read port (64-bit)
+TAVG_MEM_W_LO, TAVG_MEM_W_HI = 0x1C, 0x20          # buffer base address, write port: same value as the read port
+TAVG_ENABLE, TAVG_N, TAVG_SLOTS, TAVG_RESTART, TAVG_STATUS = 0x28, 0x30, 0x38, 0x40, 0x48
+TAVG_MAX_N = 255
+TAVG_LUMA_FRAME_BYTES = WIDTH * HEIGHT             # one history frame: 8-bit brightness
+TAVG_SUM_FRAME_BYTES = WIDTH * HEIGHT * 2          # the running-sum frame: 16 bits per pixel
 
 # ---- AXI VDMA (Xilinx PG020) -----------------------------------------------------------------
 VDMA_MM2S_CR, VDMA_MM2S_SR = 0x00, 0x04

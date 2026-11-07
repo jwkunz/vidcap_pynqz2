@@ -34,6 +34,12 @@ class PynqAllocator:
         buf = allocate(shape=(HEIGHT, WIDTH, 3), dtype=np.uint8)
         return FrameBuffer(int(buf.physical_address), buf, buf)
 
+    def alloc_bytes(self, nbytes: int) -> FrameBuffer:
+        """One contiguous byte buffer (for example the temporal-average history)."""
+        from pynq import allocate
+        buf = allocate(shape=(int(nbytes),), dtype=np.uint8)
+        return FrameBuffer(int(buf.physical_address), buf, buf)
+
 
 class ReservedRegion:
     """Buffers at FIXED physical addresses inside a region the kernel does not use.
@@ -62,6 +68,13 @@ class ReservedRegion:
         arr = np.frombuffer(self._map, dtype=np.uint8, count=FRAME_BYTES, offset=off).reshape(HEIGHT, WIDTH, 3)
         return FrameBuffer(self.base + off, arr)
 
+    def alloc_bytes(self, nbytes: int) -> FrameBuffer:
+        step = (int(nbytes) + 0xFFF) & ~0xFFF
+        if self._next + step > self.size:
+            raise MemoryError("reserved region is full")
+        off, self._next = self._next, self._next + step
+        return FrameBuffer(self.base + off, np.frombuffer(self._map, dtype=np.uint8, count=int(nbytes), offset=off))
+
 
 class HeapAllocator:
     """Ordinary numpy arrays with made-up physical addresses. For tests and dry runs only."""
@@ -73,5 +86,11 @@ class HeapAllocator:
     def alloc(self) -> FrameBuffer:
         fb = FrameBuffer(self._next, np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8))
         self._next += (FRAME_BYTES + 0xFFF) & ~0xFFF
+        self.allocated.append(fb)
+        return fb
+
+    def alloc_bytes(self, nbytes: int) -> FrameBuffer:
+        fb = FrameBuffer(self._next, np.zeros(int(nbytes), dtype=np.uint8))
+        self._next += (int(nbytes) + 0xFFF) & ~0xFFF
         self.allocated.append(fb)
         return fb

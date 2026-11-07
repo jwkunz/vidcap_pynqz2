@@ -11,11 +11,12 @@ static inline ap_uint<8> clamp255(ap_int<16> v) {
     return (ap_uint<8>)v;
 }
 
-void vc_filter(vc_stream &in, vc_stream &out, ap_uint<3> mode, ap_uint<8> threshold) {
+void vc_filter(vc_stream &in, vc_stream &out, ap_uint<3> mode, ap_uint<8> threshold, ap_uint<8> noise_amount) {
 #pragma HLS INTERFACE axis port = in
 #pragma HLS INTERFACE axis port = out
 #pragma HLS INTERFACE s_axilite port = mode bundle = control
 #pragma HLS INTERFACE s_axilite port = threshold bundle = control
+#pragma HLS INTERFACE s_axilite port = noise_amount bundle = control
 // Production builds free-run (no start/done handshake). Vitis HLS co-simulation cannot drive
 // ap_ctrl_none designs of this shape, so co-sim builds leave it out and use the default
 // block-level handshake; the pixel datapath is identical.
@@ -37,6 +38,11 @@ void vc_filter(vc_stream &in, vc_stream &out, ap_uint<3> mode, ap_uint<8> thresh
     // Latch the controls for the whole frame.
     const ap_uint<3> mode_l = mode;
     const ap_uint<8> thr_l = threshold;
+    const ap_uint<8> amt_l = noise_amount;
+
+    // Free-running noise generator: its state survives from frame to frame (the hardware never resets it
+    // after power-up), so the grain is different in every frame.
+    static ap_uint<32> lfsr = VC_LFSR_SEED;
 
     vc_pixel win[3][3];
 #pragma HLS ARRAY_PARTITION variable = win complete dim = 0
@@ -141,6 +147,16 @@ frame_loop:
                 sharp_c[ch] = clamp255(sv);
             }
 
+            // Noise: one LFSR update per output pixel in EVERY mode, so the sequence depends only on how many
+            // pixels have been output, never on which mode was selected.
+            lfsr = vc_lfsr_step8(lfsr);
+            const ap_int<9> ns = (ap_int<9>)(ap_int<8>)lfsr.range(7, 0);           // signed -128..127
+            const ap_int<18> nprod = ns * (ap_int<10>)amt_l;
+            const ap_int<10> ndelta = (ap_int<10>)(nprod >> 8);
+            const vc_pixel noisy = vc_rgb(clamp255((ap_int<16>)vc_r(ctr) + ndelta),
+                                          clamp255((ap_int<16>)vc_g(ctr) + ndelta),
+                                          clamp255((ap_int<16>)vc_b(ctr) + ndelta));
+
             // Select
             vc_pixel result;
             const ap_uint<8> gc = g[1][1];
@@ -151,6 +167,7 @@ frame_loop:
             case VC_MODE_SOBEL:     result = vc_rgb(sob, sob, sob); break;
             case VC_MODE_BLUR:      result = vc_rgb(blur_c[0], blur_c[1], blur_c[2]); break;
             case VC_MODE_SHARPEN:   result = vc_rgb(sharp_c[0], sharp_c[1], sharp_c[2]); break;
+            case VC_MODE_NOISE:     result = noisy; break;
             default:                result = ctr; break;   // passthrough (and any unused code)
             }
 

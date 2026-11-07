@@ -41,6 +41,18 @@ def design_loaded_since_boot(bitfile: str, state_file: Optional[str] = None, boo
         return False
 
 
+def loaded_design_has(block: str, ip_dict=None) -> bool:
+    """True if the design that is loaded right now contains a block of this name (as named in the block design).
+
+    Older bitstreams lack newer blocks, and reading registers of a block that is not there can fault the process or
+    hang the bus, so anything that touches an optional block asks first. PYNQ records the loaded design's blocks.
+    """
+    if ip_dict is None:
+        from pynq import PL
+        ip_dict = PL.ip_dict
+    return block in ip_dict
+
+
 def _stop_channel(m: Mmio, cr: int, sr: int, timeout_s: float) -> str:
     """Stop one VDMA channel. Returns "idle", "stopped" or "reset"; raises if it will not stop."""
     if m.read(sr) & R.VDMA_SR_HALTED:
@@ -61,10 +73,21 @@ def _stop_channel(m: Mmio, cr: int, sr: int, timeout_s: float) -> str:
                       "would wedge the board's memory port. Reboot the board, then load the design.")
 
 
-def stop_running_design(mmio_for: Callable[[int], Mmio] = DevMemMmio, timeout_s: float = 0.5) -> List[str]:
-    """Stop the DMA engines of the currently loaded vidcap design. Returns what was done, for logging."""
+def stop_running_design(mmio_for: Callable[[int], Mmio] = DevMemMmio, timeout_s: float = 0.5,
+                        has_tavg: bool = True) -> List[str]:
+    """Stop everything of the currently loaded vidcap design that writes to memory. Returns what was done.
+
+    has_tavg=False for a design built before the temporal average existed (its registers are not there to read).
+    """
     done = []
     live, vmem = mmio_for(R.BASES["vdma_live"]), mmio_for(R.BASES["vdma_vmem"])
+    # the temporal average writes to memory every frame while it is on: switch it off and let its frame finish
+    if has_tavg:
+        tavg = mmio_for(R.BASES["tavg"])
+        if tavg.read(R.TAVG_ENABLE) & 1:
+            tavg.write(R.TAVG_ENABLE, 0)
+            done.append("temporal average: switched off")
+            time.sleep(0.06)
     # the snapshot core writes to memory too, but only for a few tens of milliseconds per capture
     snap = mmio_for(R.BASES["snap"])
     end = time.monotonic() + timeout_s

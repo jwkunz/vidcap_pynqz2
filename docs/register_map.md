@@ -18,6 +18,7 @@ All registers are 32 bits wide, accessed at 4-byte aligned offsets. Every block 
 | `ovl` | `0x4006_0000` | `vc_overlay` timestamp overlay (HLS) |
 | `snap` | `0x4007_0000` | `vc_snapshot` frame capture (HLS) |
 | `intc` | `0x4008_0000` | AXI interrupt controller |
+| `tavg` | `0x4009_0000` | `vc_tavg` temporal average over the last N frames (HLS) |
 
 The authoritative source for these addresses is `src/overlay/vidcap_bd.tcl` (the `map` list at the
 end); the register offsets below for HLS blocks are checked against the HLS-generated headers by
@@ -86,13 +87,19 @@ SEL only completes if the selected reader is producing frames (its VDMA must be 
 
 | Offset | Name | Bits | Description |
 |---|---|---|---|
-| `0x10` | MODE | `[2:0]` | 0 passthrough (default), 1 invert, 2 grayscale, 3 threshold, 4 sobel, 5 blur, 6 sharpen, 7 = passthrough |
+| `0x10` | MODE | `[2:0]` | 0 passthrough (default), 1 invert, 2 grayscale, 3 threshold, 4 sobel, 5 blur, 6 sharpen, 7 noise |
 | `0x18` | THRESHOLD | `[7:0]` | luma threshold for mode 3: pixel is white if luma > THRESHOLD |
+| `0x20` | NOISE_AMOUNT | `[7:0]` | strength of mode 7: 0 = none, 255 = pixels move by up to +-127 |
 
 Sampled once at the start of each frame. There is no start/stop register: the core free-runs.
 Edges are handled by replicating the border pixel. Luma = (77 R + 150 G + 29 B) >> 8. Sobel is
 |Gx| + |Gy| of the luma, clamped to 255. Blur is a 3x3 Gaussian (1 2 1 / 2 4 2 / 1 2 1) / 16.
 Sharpen is 5 x centre minus the four neighbours, clamped.
+
+**Noise (mode 7)** adds retro-VCR grain. A free-running 32-bit Galois LFSR (taps 32, 22, 2, 1; polynomial `0x80200003`,
+seed `0xACE1ACE1` at power-up) is advanced 8 steps per **output pixel in every mode** and never reset. The low byte of the
+state is a signed sample *s*; all three channels of the pixel change by `(s x NOISE_AMOUNT) >> 8` (arithmetic shift), clamped
+to 0..255, so the noise is grey and differs in every frame.
 
 ## `ovl` — `vc_overlay` (HLS, `s_axi_control`)
 
@@ -126,6 +133,40 @@ video through; when triggered it also writes the next complete frame to DDR.
 
 The `irq` output is high while DONE count != ACK. Typical use: read DONE (`d`), write TRIGGER+1, wait
 until DONE = `d + 1`, read the buffer, write ACK = DONE.
+
+## `tavg` — `vc_tavg` (HLS, `s_axi_control`)
+
+Moving average of the brightness over the last N frames, between the live/video-memory mux and the filter. It uses a running sum
+so the memory traffic does not depend on N:
+
+    S[t] = S[t-1] + Y[t] - Y[t-N]        average[t] = S[t] / N        out = clamp(rgb + (average - Y_now))
+
+`Y` is 8-bit luma `(77 R + 150 G + 29 B) >> 8`; the sum is exact 16-bit integer arithmetic. Colour is kept from the current
+frame. While fewer than N frames have been seen since a restart it averages the frames it has, so the first output is the input
+unchanged. `average = (S x R + 0x8000) >> 16` with `R = round(65536 / frames_in_window)`, which gives exactly the input
+back for a constant picture. Off (the default), it passes video through and does no memory traffic.
+
+| Offset | Name | Access | Description |
+|---|---|---|---|
+| `0x10` | MEM_R_LO / HI (`0x14`) | RW | base address of the buffer, read port (64-bit) |
+| `0x1C` | MEM_W_LO / HI (`0x20`) | RW | base address of the buffer, write port: **write the same address as MEM_R** |
+| `0x28` | ENABLE | RW | bit0: 1 = averaging, 0 = pass-through (history is discarded) |
+| `0x30` | N | RW | window length 1..255 (clamped to SLOTS) |
+| `0x38` | SLOTS | RW | number of brightness frames the buffer holds (ring size), 1..255 |
+| `0x40` | RESTART | RW | 8-bit counter: writing a different value empties the window |
+| `0x48` | STATUS | R | `[7:0]` frames in the average now, `[15:8]` frames since the last restart |
+
+All controls are sampled once at the start of each frame. The average restarts by itself when ENABLE goes 0 to 1, or N or
+SLOTS changes.
+
+**Buffer layout** (one contiguous, physically addressed region, no alignment requirement beyond 8 bytes; 4 KiB recommended):
+
+    [ ring: SLOTS brightness frames, W*H bytes each ][ sum frame: W*H little-endian 16-bit values ]
+
+Size = SLOTS x 921,600 + 1,843,200 bytes. Frame *t* is written to ring slot (*t* mod SLOTS) and the frame that leaves the window
+is read from slot (*t* - N) mod SLOTS. The buffer does not need to be cleared. Memory traffic while on: read the oldest frame
+(1 byte/pixel), read the sum (2), write the sum (2), write the new frame (1), about 330 MB/s at 720p60, whatever N is.
+Switch it off and wait two frames before freeing the buffer.
 
 ## `vdma_live`, `vdma_vmem` — AXI VDMA
 
@@ -173,8 +214,8 @@ and **VSIZE last** (that write starts the transfer).
 
 1. Load `vidcap.bit` (and the matching `vidcap.hwh` if using PYNQ).
 2. Check the three ID registers (`rtc`, `isel`, `vmux`).
-3. Allocate 6 frames: 3 live, 2 video memory, 1 snapshot. Zero them.
+3. Allocate 6 frames: 3 live, 2 video memory, 1 snapshot. Zero them. Optionally allocate the `tavg` buffer (SLOTS x 921,600 + 1,843,200 bytes).
 4. Set `filt` MODE = 0, THRESHOLD; configure `ovl`; set `isel` timeouts, FALLBACK_EN, SRC; write `snap`
-   MEM; write the real time to `rtc`.
+   MEM; if using `tavg`, write its buffer address to both MEM_R and MEM_W, then SLOTS and N, with ENABLE = 0; write the real time to `rtc`.
 5. Start `vdma_live` S2MM, then `vdma_live` MM2S (genlock slave), then `vdma_vmem` MM2S (parked).
 6. To show an image: write it into the hidden `vdma_vmem` frame, write PARK_PTR, set `vmux` SEL = 1.

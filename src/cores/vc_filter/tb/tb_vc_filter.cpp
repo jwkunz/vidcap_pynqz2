@@ -22,12 +22,27 @@ static uint32_t at(const Frame &f, int x, int y) {
     return f[y * VC_WIDTH + x];
 }
 
-static Frame golden(const Frame &in, int mode, int thr) {
+// The hardware noise generator is free-running: it advances once per output pixel in every mode and is never
+// reset, so the testbench mirrors its state across every call.
+static uint32_t g_lfsr = VC_LFSR_SEED;
+static uint32_t lfsr_step8(uint32_t s) {
+    for (int i = 0; i < 8; i++) { uint32_t lsb = s & 1; s >>= 1; if (lsb) s ^= 0x80200003u; }
+    return s;
+}
+
+static Frame golden(const Frame &in, int mode, int thr, int noise = 0) {
     Frame out(in.size());
     for (int y = 0; y < VC_HEIGHT; y++)
         for (int x = 0; x < VC_WIDTH; x++) {
             uint32_t c = at(in, x, y), res = c;
+            g_lfsr = lfsr_step8(g_lfsr);                     // one step per output pixel, whatever the mode
             switch (mode) {
+            case VC_MODE_NOISE: {
+                int s8 = (int)(int8_t)(g_lfsr & 0xFF);
+                int d = (s8 * noise) >> 8;                   // arithmetic shift, as in the hardware
+                res = RGB(clampi(R(c) + d), clampi(G(c) + d), clampi(B(c) + d));
+                break;
+            }
             case VC_MODE_INVERT: res = ~c & 0xFFFFFF; break;
             case VC_MODE_GRAYSCALE: { int g = luma(c); res = RGB(g, g, g); break; }
             case VC_MODE_THRESHOLD: res = luma(c) > thr ? 0xFFFFFF : 0; break;
@@ -117,10 +132,11 @@ static Frame make_shapes() {
 }
 
 int main() {
-    static const char *names[] = {"passthrough", "invert", "grayscale", "threshold", "sobel", "blur", "sharpen"};
+    static const char *names[] = {"passthrough", "invert", "grayscale", "threshold", "sobel", "blur", "sharpen", "noise"};
     int fails = 0;
     Frame imgs[2] = {make_noise(12345), make_shapes()};
     const int THR = 100;
+    const int NOISE = 90;
 
     for (int im = 0; im < 2; im++)
         for (int mode = 0; mode < VC_MODE_COUNT; mode++) {
@@ -128,27 +144,47 @@ int main() {
             // leading junk before the start of frame must be ignored
             for (int k = 0; k < VC_WIDTH / 2 + 3; k++) { vc_beat j; j.data = 0x123456 + k; j.user = 0; j.last = 0; in.write(j); }
             push_frame(in, imgs[im]);
-            vc_filter(in, out, mode, THR);
+            vc_filter(in, out, mode, THR, NOISE);
             char tag[64]; snprintf(tag, sizeof tag, "%s / %s", im ? "shapes" : "noise", names[mode]);
-            fails += check_frame(out, golden(imgs[im], mode, THR), tag);
+            fails += check_frame(out, golden(imgs[im], mode, THR, NOISE), tag);
         }
 
     // back-to-back frames with different modes (mode is re-read each frame)
     {
         vc_stream in, out;
         push_frame(in, imgs[1]); push_frame(in, imgs[0]);
-        vc_filter(in, out, VC_MODE_SOBEL, THR);
-        fails += check_frame(out, golden(imgs[1], VC_MODE_SOBEL, THR), "two frames: first (sobel)");
-        vc_filter(in, out, VC_MODE_INVERT, THR);
-        fails += check_frame(out, golden(imgs[0], VC_MODE_INVERT, THR), "two frames: second (invert)");
+        vc_filter(in, out, VC_MODE_SOBEL, THR, NOISE);
+        fails += check_frame(out, golden(imgs[1], VC_MODE_SOBEL, THR, NOISE), "two frames: first (sobel)");
+        vc_filter(in, out, VC_MODE_INVERT, THR, NOISE);
+        fails += check_frame(out, golden(imgs[0], VC_MODE_INVERT, THR, NOISE), "two frames: second (invert)");
     }
-    // the unused mode code 7 must behave like passthrough
+    // noise: amount 0 changes nothing, larger amounts change more, full scale stays inside the pixel range,
+    // and the grain differs from frame to frame because the generator keeps running
     {
-        vc_stream in, out;
-        push_frame(in, imgs[0]);
-        vc_filter(in, out, 7, THR);
-        fails += check_frame(out, golden(imgs[0], 0, THR), "mode 7 == passthrough");
+        for (int amt : {0, 1, 40, 255}) {
+            vc_stream in, out;
+            push_frame(in, imgs[1]);
+            vc_filter(in, out, VC_MODE_NOISE, THR, amt);
+            char tag[64]; snprintf(tag, sizeof tag, "noise amount %d", amt);
+            Frame exp = golden(imgs[1], VC_MODE_NOISE, THR, amt);
+            if (amt == 0 && exp != imgs[1]) { printf("FAIL golden: amount 0 must be a no-op\n"); fails++; }
+            fails += check_frame(out, exp, tag);
+        }
+        Frame a = golden(imgs[1], VC_MODE_NOISE, THR, 80), b = golden(imgs[1], VC_MODE_NOISE, THR, 80);
+        long diff = 0; for (size_t i = 0; i < a.size(); i++) diff += (a[i] != b[i]);
+        printf("%s grain differs between consecutive frames (%ld of %zu pixels)\n", diff > (long)a.size() / 2 ? "ok  " : "FAIL", diff, a.size());
+        if (diff <= (long)a.size() / 2) fails++;
+        // the noise is grey: all three channels move together (before clamping)
+        Frame n = golden(imgs[0], VC_MODE_NOISE, THR, 60);
+        int same_delta = 0, tot = 0;
+        for (size_t i = 0; i < n.size(); i++) {
+            int dr = R(n[i]) - R(imgs[0][i]), dg = G(n[i]) - G(imgs[0][i]), db = B(n[i]) - B(imgs[0][i]);
+            if (R(imgs[0][i]) > 40 && R(imgs[0][i]) < 215 && G(imgs[0][i]) > 40 && G(imgs[0][i]) < 215 && B(imgs[0][i]) > 40 && B(imgs[0][i]) < 215) { tot++; same_delta += (dr == dg && dg == db); }
+        }
+        printf("%s noise is grey (%d of %d unclamped pixels moved all channels equally)\n", same_delta == tot ? "ok  " : "FAIL", same_delta, tot);
+        if (same_delta != tot) fails++;
     }
+    // unused-in-the-register codes cannot occur (3 bits): mode 7 is noise
 
     if (fails) { printf("TEST FAILED (%d)\n", fails); return 1; }
     printf("TEST PASSED\n");

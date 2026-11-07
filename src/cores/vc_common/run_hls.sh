@@ -29,9 +29,13 @@ case "$STEP" in
   syn|package) W=1280; H=720; CTRL="-DVC_CTRL_NONE"; WS="$ROOT/workspace/vitishls/${CORE}_build" ;;
   *) echo "unknown step '$STEP'" >&2; exit 2 ;;
 esac
+# m_axi port depth for the temporal average: the testbench buffer (8 ring slots + sum frame) for simulation,
+# the full 255-slot range for the production build
+if [ "$STEP" = "csim" ] || [ "$STEP" = "cosim" ]; then SLOTS_MAX=8; else SLOTS_MAX=255; fi
+TAVG_DEPTH=$((SLOTS_MAX * W * H / 8 + W * H * 2 / 8))
 mkdir -p "$WS"
 CFG="$WS/hls.cfg"
-sed -e "s#@SRC@#$SRC#g" -e "s#@COMMON@#$COMMON#g" -e "s#@W@#$W#g" -e "s#@H@#$H#g" -e "s#@CTRL@#$CTRL#g" -e "s#@SNAP_DEPTH@#$((W * 3 / 8 * H))#g" "$SRC/hls.cfg.in" > "$CFG"
+sed -e "s#@SRC@#$SRC#g" -e "s#@COMMON@#$COMMON#g" -e "s#@W@#$W#g" -e "s#@H@#$H#g" -e "s#@CTRL@#$CTRL#g" -e "s#@SNAP_DEPTH@#$((W * 3 / 8 * H))#g" -e "s#@TAVG_DEPTH@#$TAVG_DEPTH#g" "$SRC/hls.cfg.in" > "$CFG"
 
 case "$STEP" in
   csim)    FLAG="--csim" ;;

@@ -10,7 +10,7 @@ import numpy as np
 
 from . import regs as R
 from .backend import Mmio
-from .blocks import (Filter, InputSelect, Rtc, Snapshot, StreamMux, TimestampOverlay, Vdma,
+from .blocks import (Filter, InputSelect, Rtc, Snapshot, StreamMux, TemporalAverage, TimestampOverlay, Vdma,
                      VidcapError)
 from .memory import FrameBuffer
 
@@ -35,11 +35,13 @@ class Vidcap:
         self.filter = Filter(mm["filt"])
         self.overlay = TimestampOverlay(mm["ovl"])
         self.snap = Snapshot(mm["snap"])
+        self.tavg = TemporalAverage(mm["tavg"])
         self.vdma_live = Vdma(mm["vdma_live"])
         self.vdma_vmem = Vdma(mm["vdma_vmem"])
         self._alloc = allocator
-        self._live = self._vmem = self._snapbuf = None
+        self._live = self._vmem = self._snapbuf = self._tavgbuf = None
         self._front = 0
+        self.history_frames = 0              # frames of history the temporal average can use (set by start())
         self.tz: Optional[str] = None            # IANA zone name for the on-screen time; None = this board's own zone
 
     # ------------------------------------------------------------------ construction
@@ -58,7 +60,7 @@ class Vidcap:
             if protect:
                 from . import safety
                 if safety.design_loaded_since_boot(bitfile):
-                    actions = safety.stop_running_design()
+                    actions = safety.stop_running_design(has_tavg=safety.loaded_design_has("tavg"))
                     warnings.warn("vidcap was already loaded (another notebook or script?). Its DMA engines were "
                                   f"stopped ({'; '.join(actions)}); restart that kernel, it no longer controls the "
                                   "hardware.", RuntimeWarning, stacklevel=2)
@@ -72,8 +74,11 @@ class Vidcap:
         self.rtc.check(); self.input.check(); self.mux.check()
 
     def start(self, source: str = "hdmi", fallback: bool = True, sync_time: bool = True,
-              timestamp: bool = True, tz: Optional[str] = None) -> None:
-        """tz: show the time in this IANA zone (for example "America/New_York"); default is the board's zone."""
+              timestamp: bool = True, tz: Optional[str] = None, history_frames: int = 16) -> None:
+        """tz: show the time in this IANA zone (for example "America/New_York"); default is the board's zone.
+        history_frames: how many frames of brightness history to reserve for the temporal average, which can then
+        average over up to that many frames. Costs 0.92 MB per frame plus 1.8 MB, taken from the board's
+        contiguous-memory pool (128 MB, shared with the video buffers)."""
         if tz is not None:
             self.tz = tz
         self.check()
@@ -83,6 +88,9 @@ class Vidcap:
         self._snapbuf = a.alloc()
         for fb in self._live + self._vmem + [self._snapbuf]:
             fb.array[:] = 0
+        self.history_frames = int(history_frames)
+        self._tavgbuf = a.alloc_bytes(TemporalAverage.bytes_needed(self.history_frames))
+        self._tavgbuf.array[:] = 0
 
         # control blocks first, so video is in a known state before it starts flowing
         self.mux.select("live", wait=False)
@@ -92,6 +100,9 @@ class Vidcap:
         self.input.set_fallback(fallback)
         self.input.set_source(source)
         self.snap.set_buffer(self._snapbuf.phys)
+        self.tavg.enable(False)                      # off until asked for; the buffer is set first
+        self.tavg.set_buffer(self._tavgbuf.phys, self.history_frames)
+        self.tavg.set_n(min(8, self.history_frames))
         if sync_time:
             self.sync_time()
 
@@ -109,15 +120,33 @@ class Vidcap:
             vdma.clear_errors(ch)
 
     def stop(self) -> None:
+        # The temporal average writes to memory too: switch it off, and let it finish its frame, BEFORE its buffer
+        # is given back (it takes effect at the next frame start, so allow two frames).
+        self.tavg.enable(False)
+        time.sleep(3 * FRAME_TIME_S)
         for v, ch in ((self.vdma_live, "s2mm"), (self.vdma_live, "mm2s"), (self.vdma_vmem, "mm2s")):
             v.reset(ch)
-        for fb in (self._live or []) + (self._vmem or []) + ([self._snapbuf] if self._snapbuf else []):
+        for fb in ((self._live or []) + (self._vmem or []) + ([self._snapbuf] if self._snapbuf else [])
+                   + ([self._tavgbuf] if self._tavgbuf else [])):
             fb.free()
-        self._live = self._vmem = self._snapbuf = None
+        self._live = self._vmem = self._snapbuf = self._tavgbuf = None
 
     # ------------------------------------------------------------------ controls
-    def set_filter(self, mode: str, threshold: Optional[int] = None) -> None:
-        self.filter.set_mode(mode, threshold)
+    def set_filter(self, mode: str, threshold: Optional[int] = None, noise: Optional[int] = None) -> None:
+        """Spatial filter or noise. The temporal average is separate (set_temporal_average) and can be combined
+        with any of these. mode "noise" adds retro-VCR grain of strength `noise` (0..255)."""
+        self.filter.set_mode(mode, threshold, noise)
+
+    def set_temporal_average(self, n: Optional[int]) -> None:
+        """Average the brightness of the last `n` frames (1..history_frames); None or 0 switches it off.
+        The first frames after switching on or changing n average the frames available so far."""
+        if not n:
+            self.tavg.enable(False)
+            return
+        if self._tavgbuf is None:
+            raise VidcapError("call start() first")
+        self.tavg.set_n(int(n))
+        self.tavg.enable(True)
 
     def use_test_pattern(self, on: bool = True) -> None:
         self.input.set_source("test" if on else "hdmi")
@@ -184,6 +213,7 @@ class Vidcap:
             "source_selected": self.input.source(),
             "display": self.mux.active(),
             "filter": self.filter.mode(),
+            "temporal_average": {"enabled": self.tavg.enabled(), "n": self.tavg.n(), **self.tavg.status()},
             "timestamp": self.overlay.enabled(),
             "clock": self._clock_text(),
             "clock_was_set": self.rtc.was_set,

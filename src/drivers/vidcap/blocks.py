@@ -170,7 +170,8 @@ class Filter:
     def __init__(self, mmio: Mmio):
         self.m = mmio
 
-    def set_mode(self, mode: Union[str, int], threshold: Optional[int] = None) -> None:
+    def set_mode(self, mode: Union[str, int], threshold: Optional[int] = None, noise: Optional[int] = None) -> None:
+        """Select a filter. `threshold` is used by "threshold"; `noise` (0..255) by "noise" - see set_noise()."""
         code = R.FILTER_MODES[mode] if isinstance(mode, str) else int(mode)
         if not 0 <= code <= 7:
             raise ValueError("mode code must be 0..7")
@@ -178,7 +179,19 @@ class Filter:
             if not 0 <= threshold <= 255:
                 raise ValueError("threshold must be 0..255")
             self.m.write(R.FILT_THRESHOLD, threshold)
+        if noise is not None:
+            self.set_noise(noise)
         self.m.write(R.FILT_MODE, code)
+
+    def set_noise(self, amount: int) -> None:
+        """Strength of the retro-VCR grain used by mode "noise": 0 = none, 255 = the pixels move by up to +-127.
+        All three colour channels move together (grey snow); the pattern changes every frame."""
+        if not 0 <= amount <= 255:
+            raise ValueError("noise amount must be 0..255")
+        self.m.write(R.FILT_NOISE, amount)
+
+    def noise(self) -> int:
+        return self.m.read(R.FILT_NOISE) & 0xFF
 
     def mode(self) -> str:
         code = self.m.read(R.FILT_MODE) & 7
@@ -187,6 +200,61 @@ class Filter:
 
     def threshold(self) -> int:
         return self.m.read(R.FILT_THRESHOLD) & 0xFF
+
+
+# =========================================================================================
+class TemporalAverage:
+    """Moving average of brightness over the last N frames, with a running sum (vc_tavg).
+
+    Needs one contiguous buffer in DDR, set with set_buffer(): `slots` brightness frames (the history ring, one
+    byte per pixel) followed by one 16-bit-per-pixel sum frame. N can be anything from 1 up to `slots`.
+    Changing N, `slots`, or switching it off and on restarts the average: it then averages the frames it has
+    (1, 2, 3 ... N), so the first output frame is the input unchanged. Colour is kept from the current frame."""
+
+    def __init__(self, mmio: Mmio):
+        self.m = mmio
+
+    @staticmethod
+    def bytes_needed(slots: int) -> int:
+        """Size of the buffer for a history of `slots` frames."""
+        return slots * R.TAVG_LUMA_FRAME_BYTES + R.TAVG_SUM_FRAME_BYTES
+
+    def set_buffer(self, phys: int, slots: int) -> None:
+        """Point the hardware at its buffer (read and write ports get the same address) and set the ring size."""
+        if not 1 <= slots <= R.TAVG_MAX_N:
+            raise ValueError(f"slots must be 1..{R.TAVG_MAX_N}")
+        for lo, hi in ((R.TAVG_MEM_R_LO, R.TAVG_MEM_R_HI), (R.TAVG_MEM_W_LO, R.TAVG_MEM_W_HI)):
+            self.m.write(lo, phys & 0xFFFF_FFFF)
+            self.m.write(hi, phys >> 32)
+        self.m.write(R.TAVG_SLOTS, slots)
+
+    def slots(self) -> int:
+        return self.m.read(R.TAVG_SLOTS) & 0xFF
+
+    def set_n(self, n: int) -> None:
+        if not 1 <= n <= R.TAVG_MAX_N:
+            raise ValueError(f"N must be 1..{R.TAVG_MAX_N}")
+        if n > self.slots():
+            raise ValueError(f"N={n} is more than the {self.slots()} frames of history the buffer holds")
+        self.m.write(R.TAVG_N, n)
+
+    def n(self) -> int:
+        return self.m.read(R.TAVG_N) & 0xFF
+
+    def enable(self, on: bool = True) -> None:
+        self.m.write(R.TAVG_ENABLE, 1 if on else 0)
+
+    def enabled(self) -> bool:
+        return bool(self.m.read(R.TAVG_ENABLE) & 1)
+
+    def restart(self) -> None:
+        """Empty the window; the next frame starts a new average."""
+        self.m.write(R.TAVG_RESTART, (self.m.read(R.TAVG_RESTART) + 1) & 0xFF)
+
+    def status(self) -> Dict[str, int]:
+        """depth = frames in the average right now (grows 1..N after a restart); frames = frames since the restart."""
+        st = self.m.read(R.TAVG_STATUS)
+        return {"depth": st & 0xFF, "frames": (st >> 8) & 0xFF}
 
 
 # =========================================================================================

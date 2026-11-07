@@ -18,9 +18,20 @@ from . import regs as R
 from .backend import DevMemMmio, Mmio
 
 
-def sample(mmio_for: Callable[[int], Mmio] = DevMemMmio, seconds: float = 1.0) -> Dict[str, object]:
+def _loaded_blocks_known() -> bool:
+    """Does the loaded design contain the temporal average? Unknown (False) if PYNQ is not available: reading the
+    registers of a block an older design lacks can fault the process, so then the block is simply not read."""
+    try:
+        from .safety import loaded_design_has
+        return loaded_design_has("tavg")
+    except Exception:
+        return False
+
+
+def sample(mmio_for: Callable[[int], Mmio] = DevMemMmio, seconds: float = 1.0,
+           has_tavg: bool = True) -> Dict[str, object]:
     """Read the registers twice, `seconds` apart, and return values and per-second rates."""
-    m = {n: mmio_for(b) for n, b in R.BASES.items()}
+    m = {n: mmio_for(b) for n, b in R.BASES.items() if has_tavg or n != "tavg"}
 
     def once():
         isel, snap, vl = m["isel"], m["snap"], m["vdma_live"]
@@ -35,6 +46,10 @@ def sample(mmio_for: Callable[[int], Mmio] = DevMemMmio, seconds: float = 1.0) -
             "snap_status": snap.read(R.SNAP_STATUS), "snap_trigger": snap.read(R.SNAP_TRIGGER),
             "snap_ack": snap.read(R.SNAP_ACK), "filter": m["filt"].read(R.FILT_MODE) & 7,
             "overlay": m["ovl"].read(R.OVL_ENABLE) & 1,
+            "has_tavg": has_tavg,
+            "tavg_enable": (m["tavg"].read(R.TAVG_ENABLE) & 1) if has_tavg else 0,
+            "tavg_n": (m["tavg"].read(R.TAVG_N) & 0xFF) if has_tavg else 0,
+            "tavg_status": m["tavg"].read(R.TAVG_STATUS) if has_tavg else 0,
         }
 
     a = once()
@@ -85,7 +100,7 @@ def verdict(s: Dict[str, object]) -> List[str]:
 
 
 def main() -> int:
-    s = sample()
+    s = sample(has_tavg=_loaded_blocks_known())
     st = s["status"]
     print(f"input select : source={'test' if s['ctrl'] & 1 else 'hdmi'} fallback_en={bool(s['ctrl'] & 2)} "
           f"active={'test' if st & 8 else 'hdmi'} locked={bool(st & 1)} good={bool(st & 2)} last frame {s['w']}x{s['h']}")
@@ -94,6 +109,11 @@ def main() -> int:
     print(f"snapshot     : triggered {s['snap_trigger']}, completed {(s['snap_status'] >> 8) & 255}, acknowledged "
           f"{s['snap_ack']}, busy {s['snap_status'] & 1}")
     print(f"filter mode  : {s['filter']}   timestamp {'on' if s['overlay'] else 'off'}")
+    if s["has_tavg"]:
+        print(f"temporal avg : {'on' if s['tavg_enable'] else 'off'}   N={s['tavg_n']}   in the average now "
+              f"{s['tavg_status'] & 0xFF}   frames since restart {(s['tavg_status'] >> 8) & 0xFF}")
+    else:
+        print("temporal avg : not read (this design has none, or PYNQ's record of it is unavailable)")
     print("\nfindings:")
     for line in verdict(s):
         print("  -", line)

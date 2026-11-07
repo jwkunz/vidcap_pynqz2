@@ -34,7 +34,7 @@ set_property -dict [list \
     CONFIG.PCW_FPGA_FCLK2_ENABLE {0} CONFIG.PCW_FPGA_FCLK3_ENABLE {0} \
     CONFIG.PCW_USE_M_AXI_GP0 {1} CONFIG.PCW_USE_M_AXI_GP1 {0} \
     CONFIG.PCW_USE_S_AXI_GP0 {0} CONFIG.PCW_USE_S_AXI_HP0 {1} CONFIG.PCW_USE_S_AXI_HP1 {1} \
-    CONFIG.PCW_USE_S_AXI_HP2 {0} CONFIG.PCW_USE_S_AXI_HP3 {0} \
+    CONFIG.PCW_USE_S_AXI_HP2 {1} CONFIG.PCW_USE_S_AXI_HP3 {0} \
     CONFIG.PCW_USE_FABRIC_INTERRUPT {1} CONFIG.PCW_IRQ_F2P_INTR {1} \
 ] [get_bd_cells ps7]
 
@@ -96,6 +96,7 @@ set tpg  [cmod vc_tpg tpg]
 set isel [cmod vc_input_sel isel]
 set snap [cip vidcap:vidcap:vc_snapshot:1.0 snap]
 set vmx  [cmod vc_stream_mux vmx]
+set tavg [cip vidcap:vidcap:vc_tavg:1.0 tavg]
 set filt [cip vidcap:vidcap:vc_filter:1.0 filt]
 set ovl  [cip vidcap:vidcap:vc_overlay:1.0 ovl]
 set swp  [cmod vc_axis_swap_gb swp]
@@ -131,7 +132,9 @@ set vdma1 [cip xilinx.com:ip:axi_vdma:6.3 vdma1 \
 intf snap/out_r vdma0/S_AXIS_S2MM
 intf vdma0/M_AXIS_MM2S vmx/s_axis_live
 intf vdma1/M_AXIS_MM2S vmx/s_axis_vmem
-intf vmx/m_axis filt/in_r
+# temporal average (off by default: pure pass-through) sits between the source mux and the filter
+intf vmx/m_axis tavg/in_r
+intf tavg/out_r filt/in_r
 intf filt/out_r ovl/in_r
 intf ovl/out_r swp/s_axis
 net rtc/time_digits ovl/time_digits
@@ -195,11 +198,11 @@ net irqcat/dout intc/intr
 net intc/irq ps7/IRQ_F2P
 
 # ---------------------------------------------------------------- AXI infrastructure
-# control: PS GP0 -> 9 AXI-Lite slaves
-set ic_gp [cip xilinx.com:ip:axi_interconnect:2.1 ic_gp CONFIG.NUM_SI {1} CONFIG.NUM_MI {9}]
+# control: PS GP0 -> 10 AXI-Lite slaves
+set ic_gp [cip xilinx.com:ip:axi_interconnect:2.1 ic_gp CONFIG.NUM_SI {1} CONFIG.NUM_MI {10}]
 intf ps7/M_AXI_GP0 ic_gp/S00_AXI
 set slaves {vdma0/S_AXI_LITE vdma1/S_AXI_LITE rtc/s_axi isel/s_axi vmx/s_axi
-            filt/s_axi_control ovl/s_axi_control snap/s_axi_control intc/s_axi}
+            filt/s_axi_control ovl/s_axi_control snap/s_axi_control intc/s_axi tavg/s_axi_control}
 set i 0
 foreach s $slaves { intf ic_gp/M0${i}_AXI $s; incr i }
 
@@ -212,16 +215,22 @@ intf ic_hp0/M00_AXI ps7/S_AXI_HP0
 intf vdma1/M_AXI_MM2S ic_hp1/S00_AXI
 intf snap/m_axi_gmem ic_hp1/S01_AXI
 intf ic_hp1/M00_AXI ps7/S_AXI_HP1
+# temporal average history traffic gets its own port
+set ic_hp2 [cip xilinx.com:ip:axi_interconnect:2.1 ic_hp2 CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}]
+intf tavg/m_axi_gmem_r ic_hp2/S00_AXI
+intf tavg/m_axi_gmem_w ic_hp2/S01_AXI
+intf ic_hp2/M00_AXI ps7/S_AXI_HP2
 
 # ---------------------------------------------------------------- clocks and resets on everything at aclk
 set aclk_pins {
-    ps7/M_AXI_GP0_ACLK ps7/S_AXI_HP0_ACLK ps7/S_AXI_HP1_ACLK
+    ps7/M_AXI_GP0_ACLK ps7/S_AXI_HP0_ACLK ps7/S_AXI_HP1_ACLK ps7/S_AXI_HP2_ACLK
     ic_gp/ACLK ic_gp/S00_ACLK
     ic_hp0/ACLK ic_hp0/S00_ACLK ic_hp0/S01_ACLK ic_hp0/M00_ACLK
     ic_hp1/ACLK ic_hp1/S00_ACLK ic_hp1/S01_ACLK ic_hp1/M00_ACLK
+    ic_hp2/ACLK ic_hp2/S00_ACLK ic_hp2/S01_ACLK ic_hp2/M00_ACLK
     vdma0/s_axi_lite_aclk vdma0/m_axi_mm2s_aclk vdma0/m_axi_s2mm_aclk vdma0/m_axis_mm2s_aclk vdma0/s_axis_s2mm_aclk
     vdma1/s_axi_lite_aclk vdma1/m_axi_mm2s_aclk vdma1/m_axis_mm2s_aclk
-    snap/ap_clk filt/ap_clk ovl/ap_clk
+    snap/ap_clk filt/ap_clk ovl/ap_clk tavg/ap_clk
     tpg/aclk isel/aclk vmx/aclk swp/aclk rtc/aclk intc/s_axi_aclk
 }
 foreach p $aclk_pins { net ps7/FCLK_CLK0 $p }
@@ -232,17 +241,18 @@ set rst_pins {
     ic_gp/S00_ARESETN
     ic_hp0/S00_ARESETN ic_hp0/S01_ARESETN ic_hp0/M00_ARESETN
     ic_hp1/S00_ARESETN ic_hp1/S01_ARESETN ic_hp1/M00_ARESETN
+    ic_hp2/S00_ARESETN ic_hp2/S01_ARESETN ic_hp2/M00_ARESETN
     vdma0/axi_resetn vdma1/axi_resetn
-    snap/ap_rst_n filt/ap_rst_n ovl/ap_rst_n
+    snap/ap_rst_n filt/ap_rst_n ovl/ap_rst_n tavg/ap_rst_n
     tpg/aresetn isel/aresetn vmx/aresetn rtc/aresetn intc/s_axi_aresetn
 }
 foreach p $rst_pins { net rst/peripheral_aresetn $p }
-net rst/interconnect_aresetn ic_gp/ARESETN ic_hp0/ARESETN ic_hp1/ARESETN
+net rst/interconnect_aresetn ic_gp/ARESETN ic_hp0/ARESETN ic_hp1/ARESETN ic_hp2/ARESETN
 
 # ---------------------------------------------------------------- address map (see docs/register_map.md)
 assign_bd_address
 set map {vdma0 0x40000000 vdma1 0x40010000 rtc 0x40020000 isel 0x40030000 vmx 0x40040000
-         filt 0x40050000 ovl 0x40060000 snap 0x40070000 intc 0x40080000}
+         filt 0x40050000 ovl 0x40060000 snap 0x40070000 intc 0x40080000 tavg 0x40090000}
 # pass 1 parks every register block at a temporary address so pass 2 can never collide with the
 # addresses the automatic assignment picked; pass 2 sets the final, documented addresses.
 set k 0

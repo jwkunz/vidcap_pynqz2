@@ -80,6 +80,8 @@ def status_html(v) -> str:
         row("Source in use", inp["active_source"] + (" (fallback: no valid HDMI)" if inp["fallback_active"] else "")),
         row("Display", "video memory" if st["display"] == "vmem" else "live video"),
         row("Filter", st["filter"]),
+        row("Temporal average", ("N=%d, %d frame(s) in the average so far" % (st["temporal_average"]["n"], st["temporal_average"]["depth"]))
+            if st["temporal_average"]["enabled"] else "off"),
         row("Hardware clock", f"{st['clock']} &nbsp; ({drift})"),
         row("DMA errors", ", ".join(errs) if errs else "none", bool(errs)),
         row("Frames out", str(inp["out_frames"])),
@@ -148,11 +150,26 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
     threshold = W.IntSlider(value=v.filter.threshold() or 128, min=0, max=255, description="Threshold",
                             continuous_update=False)
 
+    noise = W.IntSlider(value=60, min=0, max=255, description="Noise", continuous_update=False)
+
     def apply_filter(_=None):
-        v.set_filter(mode.value, threshold.value)
+        v.set_filter(mode.value, threshold.value, noise=noise.value)
 
     mode.observe(guarded(apply_filter), names="value")
     threshold.observe(guarded(apply_filter), names="value")
+    noise.observe(guarded(apply_filter), names="value")
+
+    # ---- temporal average (independent of the filter above, so the two can be combined)
+    max_n = max(1, v.history_frames)
+    tavg_on = W.Checkbox(value=v.tavg.enabled(), description="Temporal average of the last", indent=False,
+                         layout=W.Layout(width="22em"))
+    tavg_n = W.IntSlider(value=min(8, max_n), min=1, max=max_n, description="frames", continuous_update=False)
+
+    def apply_tavg(_=None):
+        v.set_temporal_average(tavg_n.value if tavg_on.value else None)
+
+    tavg_on.observe(guarded(apply_tavg), names="value")
+    tavg_n.observe(guarded(apply_tavg), names="value")
 
     # ---- timestamp
     ts_on = W.Checkbox(value=v.overlay.enabled(), description="Show timestamp", indent=False)
@@ -221,7 +238,8 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
         W.HTML("<h3>vidcap controls</h3>"),
         W.VBox([source, fallback]),
         W.VBox([display_mode, image_pick]),
-        W.HTML("<b>Filter</b>"), W.HBox([mode, threshold]),
+        W.HTML("<b>Filter</b>"), W.HBox([mode, threshold]), noise,
+        W.HTML("<b>Temporal average</b> (brightness; colour is kept)"), W.HBox([tavg_on, tavg_n]),
         W.HTML("<b>Timestamp</b>"), W.HBox([ts_on, ts_clear, ts_fg, ts_bg]), W.HBox([ts_scale, ts_margin]), W.HBox([tz_box, sync]),
         W.HTML("<b>Snapshot</b>"), W.HBox([snap_btn, save_btn]), snap_info, snap_img,
         W.HTML("<b>Status</b>"), W.HBox([auto, refresh_btn]), status,
@@ -230,7 +248,7 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
     refresh_btn.on_click(refresh)
     panel.stop = stop_evt.set
     panel.widgets = {"source": source, "fallback": fallback, "display": display_mode, "image": image_pick,
-                     "mode": mode, "threshold": threshold, "ts_on": ts_on, "ts_scale": ts_scale,
+                     "mode": mode, "threshold": threshold, "noise": noise, "tavg_on": tavg_on, "tavg_n": tavg_n, "ts_on": ts_on, "ts_scale": ts_scale,
                      "ts_margin": ts_margin, "ts_fg": ts_fg, "ts_bg": ts_bg, "ts_clear": ts_clear,
                      "snap": snap_btn, "save": save_btn, "snap_img": snap_img, "tz": tz_box, "sync": sync, "status": status, "log": log,
                      "snap_info": snap_info}

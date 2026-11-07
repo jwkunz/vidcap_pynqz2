@@ -12,7 +12,10 @@ HDMI in ─► [test pattern / HDMI select] ─► snapshot ─► DDR ─► fi
 
 * **Format:** 1280x720 @ 60 Hz, 24-bit colour.
 * **Snapshot:** software-triggered capture of one complete frame into DDR, with an interrupt.
-* **Filters** (switchable per frame): passthrough, invert, grayscale, threshold, Sobel edges, blur, sharpen.
+* **Filters** (switchable per frame): passthrough, invert, grayscale, threshold, Sobel edges, blur, sharpen, and **noise**
+  (retro-VCR grain from an LFSR, adjustable strength).
+* **Temporal average:** brightness averaged over the last N frames (N programmable, up to the history you reserve), using a
+  running sum in DDR so the memory cost is the same for any N. Combines with any filter.
 * **Video memory:** double-buffered display of any image you write, also filtered.
 * **Timestamp:** date and time drawn by a hardware clock (leap years included), set from the board's clock.
 * **Test pattern:** colour bars with a moving box. Selectable by software, and automatic if the HDMI
@@ -25,9 +28,9 @@ HDMI in ─► [test pattern / HDMI select] ─► snapshot ─► DDR ─► fi
 | RTL blocks (clock, input select, mux, test pattern) | simulated with self-checking testbenches (Vivado xsim) |
 | HLS cores (filter, overlay, snapshot) | C-simulation against golden models **and** C/RTL co-simulation |
 | Python drivers | 25 unit tests against a fake register file, including a check that every register offset matches what the HLS tools generated |
-| Full design | builds from source; timing met (setup +1.1 ns, hold +0.01 ns); 19% LUTs, 13% BRAM |
-| **On the board** (`hw_smoke.py`, no HDMI source) | 23 of 23 checks pass: bitstream loads, every block answers, test pattern at 60 fps through the DMA ring, snapshot returns the colour bars in the right byte order, video-memory flip, hardware clock, 5-second fallback |
-| **Not yet verified** | a real HDMI source on the input, a monitor on the output (picture, filter effects, timestamp text, the HDMI colour-order swaps), interrupts, the browser control panel |
+| Full design | builds from source; timing met (setup +0.68 ns, hold +0.013 ns); 26% LUTs, 23% BRAM, 18% DSPs |
+| **On the board** (`hw_smoke.py`, test pattern as the source) | 33 of 33 checks pass: bitstream loads, every block answers, test pattern at 60 fps through the DMA ring, snapshot returns the colour bars in the right byte order, video-memory flip, hardware clock, noise setting, **temporal average** (window fills to N, the history ring and the 16-bit sum frame in DDR hold exactly the expected values, 60 fps with it on, N change restarts it), fallback |
+| **Not yet verified** | what the picture looks like: the grain, the averaged brightness, the filters, the timestamp text and the HDMI colour-order swaps all need a monitor; a live HDMI source through the new filters; interrupts |
 
 The board check can be repeated at any time (needs root and the PYNQ environment):
 

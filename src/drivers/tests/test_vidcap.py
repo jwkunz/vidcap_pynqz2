@@ -324,6 +324,154 @@ class TestTimeZone(unittest.TestCase):
         self.assertLess(abs(v.clock_drift()), 3)          # would be about 9 hours if it compared with local time
 
 
+try:
+    import ipywidgets as _ipywidgets  # noqa: F401
+    _HAVE_UI = True
+except ImportError:
+    _HAVE_UI = False
+
+
+class TestNoiseAndTemporalAverage(unittest.TestCase):
+    def test_noise_setting(self):
+        m = FakeMmio()
+        f = Filter(m)
+        f.set_mode("noise", noise=60)
+        self.assertEqual((m.regs[R.FILT_MODE], m.regs[R.FILT_NOISE]), (7, 60))
+        self.assertEqual(f.mode(), "noise")
+        self.assertEqual(f.noise(), 60)
+        f.set_noise(0)
+        self.assertEqual(m.regs[R.FILT_NOISE], 0)
+        for bad in (-1, 256):
+            with self.assertRaises(ValueError):
+                f.set_noise(bad)
+
+    def test_tavg_buffer_and_limits(self):
+        from vidcap import TemporalAverage
+        m = FakeMmio()
+        t = TemporalAverage(m)
+        self.assertEqual(TemporalAverage.bytes_needed(16), 16 * 921_600 + 1_843_200)
+        t.set_buffer(0x1234_5000, 16)
+        for off in (R.TAVG_MEM_R_LO, R.TAVG_MEM_W_LO):
+            self.assertEqual(m.regs[off], 0x1234_5000, "read and write ports must get the same address")
+        self.assertEqual(m.regs[R.TAVG_SLOTS], 16)
+        t.set_n(16)
+        self.assertEqual(t.n(), 16)
+        for bad in (0, 17, 256):
+            with self.assertRaises(ValueError):
+                t.set_n(bad)
+        for bad in (0, 256):
+            with self.assertRaises(ValueError):
+                t.set_buffer(0x1000, bad)
+
+    def test_tavg_enable_restart_status(self):
+        from vidcap import TemporalAverage
+        m = FakeMmio({R.TAVG_STATUS: (7 << 8) | 5})
+        t = TemporalAverage(m)
+        t.enable(True)
+        self.assertTrue(t.enabled())
+        t.enable(False)
+        self.assertFalse(t.enabled())
+        self.assertEqual(t.status(), {"depth": 5, "frames": 7})
+        for _ in range(257):
+            t.restart()
+        self.assertEqual(m.regs[R.TAVG_RESTART], 1, "the restart counter wraps at 256")
+
+    def test_start_reserves_history_and_leaves_it_off(self):
+        v, mm = _fake_pipeline()
+        v.start(sync_time=False, history_frames=12)
+        r = mm["tavg"].regs
+        self.assertEqual(r[R.TAVG_ENABLE], 0, "off until asked for")
+        self.assertEqual(r[R.TAVG_SLOTS], 12)
+        self.assertEqual(r[R.TAVG_N], 8)
+        self.assertEqual(r[R.TAVG_MEM_R_LO], v._tavgbuf.phys)
+        self.assertEqual(r[R.TAVG_MEM_W_LO], v._tavgbuf.phys)
+        self.assertEqual(len(v._tavgbuf.array), 12 * 921_600 + 1_843_200)
+        # the buffer address must be set before the hardware can be enabled
+        order = [(n, o) for n, o, _ in v.trace if n == "tavg"]
+        self.assertLess(order.index(("tavg", R.TAVG_MEM_R_LO)), len(order))
+        v2, mm2 = _fake_pipeline()
+        v2.start(sync_time=False, history_frames=4)
+        self.assertEqual(mm2["tavg"].regs[R.TAVG_N], 4, "default N never exceeds the history")
+
+    def test_set_temporal_average(self):
+        v, mm = _fake_pipeline()
+        with self.assertRaises(VidcapError):
+            v.set_temporal_average(4)                    # before start()
+        v.start(sync_time=False, history_frames=10)
+        v.set_temporal_average(6)
+        self.assertEqual((mm["tavg"].regs[R.TAVG_N], mm["tavg"].regs[R.TAVG_ENABLE]), (6, 1))
+        v.set_temporal_average(None)
+        self.assertEqual(mm["tavg"].regs[R.TAVG_ENABLE], 0)
+        v.set_temporal_average(3)
+        v.set_temporal_average(0)
+        self.assertEqual(mm["tavg"].regs[R.TAVG_ENABLE], 0)
+        with self.assertRaises(ValueError):
+            v.set_temporal_average(11)                   # more than the history holds
+        self.assertEqual(v.status()["temporal_average"]["enabled"], False)
+
+    def test_combined_with_a_spatial_filter(self):
+        v, mm = _fake_pipeline()
+        v.start(sync_time=False)
+        v.set_temporal_average(5)
+        v.set_filter("sharpen")
+        v.set_filter("noise", noise=30)
+        self.assertEqual(mm["tavg"].regs[R.TAVG_ENABLE], 1, "changing the filter must not switch the average off")
+        self.assertEqual((mm["filt"].regs[R.FILT_MODE], mm["filt"].regs[R.FILT_NOISE]), (7, 30))
+
+    def test_stop_switches_the_average_off_before_freeing_memory(self):
+        v, mm = _fake_pipeline()
+        v.start(sync_time=False)
+        v.set_temporal_average(4)
+        mark = len(v.trace)
+        v.stop()
+        after = v.trace[mark:]
+        off = next(i for i, (n, o, val) in enumerate(after) if n == "tavg" and o == R.TAVG_ENABLE and val == 0)
+        first_dma = next(i for i, (n, o, val) in enumerate(after) if n.startswith("vdma"))
+        self.assertLess(off, first_dma, "the writer must be off before the DMAs are reset and buffers freed")
+
+    def test_loading_over_a_running_design_switches_the_average_off(self):
+        from vidcap import safety
+        fakes = {}
+
+        def mmio_for(base):
+            name = next(n for n, b in R.BASES.items() if b == base)
+            if name not in fakes:
+                fakes[name] = vdma_fake()
+                fakes[name].regs[R.VDMA_S2MM_SR] = fakes[name].regs[R.VDMA_MM2S_SR] = R.VDMA_SR_HALTED   # already idle
+            return fakes[name]
+        mmio_for(R.BASES["tavg"]).regs[R.TAVG_ENABLE] = 1          # the average is running
+        done = safety.stop_running_design(mmio_for, timeout_s=0.02)
+        self.assertIn("temporal average: switched off", done)
+        self.assertEqual(fakes["tavg"].regs[R.TAVG_ENABLE], 0)
+
+    @unittest.skipUnless(_HAVE_UI, "ipywidgets not installed")
+    def test_panel_controls(self):
+        from vidcap import ui
+        v, mm = _fake_pipeline()
+        v.start(sync_time=False, history_frames=20)
+        mm["rtc"].regs[R.RTC_DATE] = 0x070B_141A
+        mm["rtc"].regs[R.RTC_TIME] = 0x0003_2909
+        panel = ui.build_panel(v, refresh_s=0.05)
+        self.addCleanup(panel.stop)
+        w = panel.widgets
+        self.assertEqual(w["tavg_n"].max, 20, "the slider range follows the reserved history")
+        w["mode"].value = "noise"
+        w["noise"].value = 200
+        self.assertEqual((mm["filt"].regs[R.FILT_MODE], mm["filt"].regs[R.FILT_NOISE]), (7, 200))
+        w["tavg_n"].value = 12
+        w["tavg_on"].value = True
+        self.assertEqual((mm["tavg"].regs[R.TAVG_N], mm["tavg"].regs[R.TAVG_ENABLE]), (12, 1))
+        w["tavg_n"].value = 5
+        self.assertEqual(mm["tavg"].regs[R.TAVG_N], 5)
+        w["tavg_on"].value = False
+        self.assertEqual(mm["tavg"].regs[R.TAVG_ENABLE], 0)
+        mm["tavg"].regs[R.TAVG_ENABLE] = 1
+        mm["tavg"].regs[R.TAVG_STATUS] = (9 << 8) | 5
+        panel.refresh()
+        self.assertIn("N=5", w["status"].value)
+        self.assertIn("5 frame(s)", w["status"].value)
+
+
 class TestRegisterMapsMatchGenerated(unittest.TestCase):
     """The HLS tools generate the true register offsets; they must agree with regs.py."""
 
@@ -351,6 +499,18 @@ class TestRegisterMapsMatchGenerated(unittest.TestCase):
         got = {k: d[k] for k in ("ENABLE", "SCALE", "MARGIN", "FG", "BG", "BG_EN")}
         self.assertEqual(got, {"ENABLE": R.OVL_ENABLE, "SCALE": R.OVL_SCALE, "MARGIN": R.OVL_MARGIN,
                                "FG": R.OVL_FG, "BG": R.OVL_BG, "BG_EN": R.OVL_BG_EN})
+
+    def test_filter_noise_register(self):
+        d = self._defines("vc_filter")
+        self.assertEqual(d["NOISE_AMOUNT"], R.FILT_NOISE)
+
+    def test_temporal_average(self):
+        d = self._defines("vc_tavg")
+        self.assertEqual((d["MEM_R"], d["MEM_W"], d["ENABLE"], d["N"], d["SLOTS"], d["RESTART"], d["STATUS"]),
+                         (R.TAVG_MEM_R_LO, R.TAVG_MEM_W_LO, R.TAVG_ENABLE, R.TAVG_N, R.TAVG_SLOTS,
+                          R.TAVG_RESTART, R.TAVG_STATUS))
+        self.assertEqual(R.TAVG_MEM_R_HI, R.TAVG_MEM_R_LO + 4)
+        self.assertEqual(R.TAVG_MEM_W_HI, R.TAVG_MEM_W_LO + 4)
 
     def test_snapshot(self):
         d = self._defines("vc_snapshot")
@@ -571,6 +731,24 @@ class TestSafety(unittest.TestCase):
             safety.stop_running_design(mmio_for, timeout_s=0.02)
         self.assertIn("Reboot", str(cm.exception))
 
+    def test_an_older_design_without_the_average_is_never_touched(self):
+        from vidcap import safety
+        mmio_for, mm = self._vdma_pair()
+        touched = []
+
+        def guarded(base):
+            if base == R.BASES["tavg"]:
+                touched.append(base)                 # reading these registers on an older design could fault
+            return mmio_for(base)
+        done = safety.stop_running_design(guarded, timeout_s=0.05, has_tavg=False)
+        self.assertEqual(touched, [], "the temporal average's registers must not be read when the design lacks it")
+        self.assertEqual(len(done), 3)
+
+    def test_asks_the_pynq_record_which_blocks_the_loaded_design_has(self):
+        from vidcap import safety
+        self.assertTrue(safety.loaded_design_has("tavg", {"tavg": 1, "filt": 1}))
+        self.assertFalse(safety.loaded_design_has("tavg", {"filt": 1, "ovl": 1}))
+
     def test_idle_channels_are_left_alone(self):
         from vidcap import safety
         mmio_for, mm = self._vdma_pair()
@@ -607,6 +785,17 @@ class TestDiagnose(unittest.TestCase):
         self.assertTrue(any("no signal" in x for x in v))
         v = diagnose.verdict(self._s(s2mm_sr=(1 << 7) | 0x11000))
         self.assertTrue(any("SOF early" in x for x in v))
+
+    def test_sample_skips_a_block_the_design_lacks(self):
+        from vidcap import diagnose
+        seen = []
+
+        def mmio_for(base):
+            seen.append(base)
+            return FakeMmio()
+        s = diagnose.sample(mmio_for, seconds=0.01, has_tavg=False)
+        self.assertNotIn(R.BASES["tavg"], seen)
+        self.assertEqual((s["tavg_enable"], s["tavg_n"]), (0, 0))
 
     def test_sample_reads_only(self):
         from vidcap import diagnose

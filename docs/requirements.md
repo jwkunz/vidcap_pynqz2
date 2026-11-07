@@ -21,8 +21,8 @@ from Jupyter via PYNQ. Fixed format: **1280x720 @ 60 Hz, 24-bit RGB**.
                               (select, pace,    (in series;                                    │
                                fallback, frame   writes 1 frame                                ▼
                                normaliser)       to DDR on trigger)          VDMA live MM2S ──┐
-                                                                                                ├─► vc_stream_mux ─► vc_filter ─► vc_overlay ─► swap ─┐
-                                              DDR [video memory x2] ─► VDMA vmem MM2S ──────────┘   (live/vmem)     (7 modes)      (timestamp)         │
+                                                                                                ├─► vc_stream_mux ─► vc_tavg ─► vc_filter ─► vc_overlay ─► swap ─┐
+                                              DDR [video memory x2] ─► VDMA vmem MM2S ──────────┘   (live/vmem) (temporal) (8 modes)      (timestamp)         │
                                                                                                                                                     ▼
                                                                           vc_rtc (hardware clock) ───────────────────► time digits ─► vc_overlay      v_axi4s_vid_out
 ```
@@ -64,11 +64,28 @@ Control: PS → AXI-Lite → a register block on every core. Interrupts: AXI INT
   (genlock keeps the reader off the frame being written). A rate mismatch repeats or drops whole frames.
 
 ### Filters
-- **REQ-FLT-1** Modes: passthrough, invert, grayscale, threshold, Sobel, blur, sharpen.
+- **REQ-FLT-1** Modes: passthrough, invert, grayscale, threshold, Sobel, blur, sharpen, noise.
 - **REQ-FLT-2** Passthrough is a real mode and the power-up default.
 - **REQ-FLT-3** Mode and threshold are AXI-Lite registers, sampled at the start of each frame.
 - **REQ-FLT-4** Output is always 1280x720 RGB888 (borders replicated, no size change).
 - **REQ-FLT-5** Filters apply to everything displayed: live video, test pattern, video memory.
+
+- **REQ-FLT-6** Noise mode adds retro-VCR grain from a free-running LFSR. Strength is a register (0 = none, 255 = up to
+  +-127); the same offset is applied to all three channels (grey snow); the pattern differs in every frame.
+
+### Temporal average
+- **REQ-TAVG-1** Average the brightness of the last N frames, N programmable 1..255 and limited by the history the
+  software reserves. Colour is taken from the current frame.
+- **REQ-TAVG-2** Use a running sum (`S = S + new - oldest`), so DDR traffic is constant, about 330 MB/s at 720p60, for any N.
+  The sum is exact integer arithmetic and cannot drift.
+- **REQ-TAVG-3** While fewer than N frames are available (after switching on, or after N changes) it averages what it has;
+  the first output frame is the input unchanged. A constant picture comes out exactly unchanged for every N.
+- **REQ-TAVG-4** Off by default; when off it passes video through and generates no memory traffic. All controls take effect
+  on a frame boundary.
+- **REQ-TAVG-5** It combines with any filter (it runs before the filter).
+- *Not supported:* an arbitrary 60-frame FIR. A general N-tap temporal FIR must read N history frames per output frame, about
+  N x 55 MB/s even for brightness only, which exceeds the memory bandwidth beyond roughly 14 taps at 60 fps. The running
+  sum gives any N for equal weights.
 
 ### Video memory
 - **REQ-VMEM-1** Software writes a 1280x720 RGB888 image to DDR and selects it for display.
@@ -108,7 +125,9 @@ Control: PS → AXI-Lite → a register block on every core. Interrupts: AXI INT
 | IN-7 | `vc_tpg` | `tb_vc_tpg` (bars, box step, bounce) |
 | SNAP-1..4 | `vc_snapshot` | `vc_snapshot` C-sim (7 cases) + C/RTL co-simulation |
 | BUF-1 | `vdma_live`, `Vdma` driver | register sequence in driver tests only |
-| FLT-1..4 | `vc_filter` | C-sim: 7 modes x 2 images vs golden model, 2-frame, junk-before-SOF; co-simulation |
+| FLT-1..4 | `vc_filter` | C-sim: 8 modes x 2 images vs golden model, 2-frame, junk-before-SOF; co-simulation |
+| FLT-6 | `vc_filter` (mode 7) | C-sim vs a golden LFSR model: amounts 0/1/40/255, grain differs per frame, grey noise; co-simulation |
+| TAVG-1..5 | `vc_tavg` | C-sim vs a golden model built from a plain list of frames (warm-up, N changes, ring wrap, N = ring size, clamping, restarts, disable/enable, exact constant picture) plus a check of the ring and sum frame in memory after every frame; a deliberate fault is caught; RTL co-simulation |
 | FLT-5, VMEM-3 | `vc_stream_mux` ahead of `vc_filter` | block design; `tb_vc_stream_mux` |
 | VMEM-1, 2 | `vdma_vmem`, `vc_stream_mux`, `Vidcap.show_image` | `tb_vc_stream_mux` (frame-aligned switch), driver tests |
 | OUT-1, 2 | `v_tc` (fixed 720p), `v_axi4s_vid_out`, `clk_wiz` (74.25 MHz exact) | timing-clean implementation |
@@ -118,11 +137,12 @@ Control: PS → AXI-Lite → a register block on every core. Interrupts: AXI INT
 
 ## 5. Resources, timing and board results (Vivado 2025.2, xc7z020clg400-1)
 
-Implementation: 10,285 LUTs (19%), 14,538 registers (14%), 18.5 BRAM tiles (13%), 28 DSPs (13%); setup slack
-+1.11 ns, hold slack +0.009 ns, 0 DRC errors. See `workspace/vivado/out/` after `make overlay`.
+Implementation (with the noise mode and the temporal average): 13,580 LUTs (26%), 19,272 registers (18%), 32.5 BRAM tiles
+(23%), 39 DSPs (18%); setup slack +0.68 ns, hold slack +0.013 ns. The temporal-average core is about 6.5k LUTs, 18 BRAM tiles and
+7 DSPs, and processes a frame in 9.46 ms. See `workspace/vivado/out/` after `make overlay`.
 The build **fails** if setup or hold timing is not met.
 
-**On the board** (`src/drivers/tests/hw_smoke.py`, test pattern only, 23 of 23 checks pass):
+**On the board** (`src/drivers/tests/hw_smoke.py`, test pattern as the source, 33 of 33 checks pass):
 
 | Verified on hardware | Evidence |
 |---|---|
@@ -134,6 +154,8 @@ The build **fails** if setup or hold timing is not met.
 | Hardware clock (REQ-TS-1, 4) | within 0.3-0.8 s of the board clock after a set and 2 s |
 | Fallback (REQ-IN-3, 5) | HDMI reported not good with nothing connected; test pattern took over after 5 s; output kept running |
 | Stability | board did not reset across two bitstream loads and the runs |
+| Noise (REQ-FLT-6) | mode and amount register accepted and read back; video stays at 60 fps at full noise (the grain itself is only visible on a monitor) |
+| Temporal average (REQ-TAVG) | window fills to N=16; all 16 history slots hold the brightness of the colour bars; the sum frame holds exactly 16 x brightness (142 of 144 sampled pixels, the rest under the moving box); 60 fps with it on; changing N restarts it; switching off works; no VDMA errors |
 
 One start-up behaviour was found and handled: the write channel flags a one-time `internal error / SOF late` because
 video is already flowing when it starts. The flags do not return once cleared (checked over 2 s, about 120 frames),

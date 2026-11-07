@@ -14,7 +14,7 @@
 
 SHELL     := /bin/bash
 ROOT      := $(CURDIR)
-CORES_HLS := vc_filter vc_overlay vc_snapshot
+CORES_HLS := vc_filter vc_overlay vc_snapshot vc_tavg
 SIM       := src/cores/vc_common/run_xsim.sh
 HLS       := src/cores/vc_common/run_hls.sh
 OUT       := workspace/vivado/out

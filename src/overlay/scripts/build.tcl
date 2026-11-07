@@ -20,7 +20,7 @@ set out   $ws/out
 
 proc banner {msg} { puts "\n===== $msg =====" }
 
-foreach d [list $refs/boards/Pynq-Z2/base/base.tcl $ws/ip_repo/vc_filter $ws/ip_repo/vc_overlay $ws/ip_repo/vc_snapshot] {
+foreach d [list $refs/boards/Pynq-Z2/base/base.tcl $ws/ip_repo/vc_filter $ws/ip_repo/vc_overlay $ws/ip_repo/vc_snapshot $ws/ip_repo/vc_tavg] {
     if {![file exists $d]} { error "missing prerequisite: $d (see the header of this script)" }
 }
 

@@ -125,19 +125,76 @@ def main():
         check("hardware clock tracks the board clock", drift < 1.5, f"{drift:.2f} s apart after set + 2 s")
         check("clock reports it was set", v.rtc.was_set)
 
-        say("== fallback: HDMI selected with no signal connected")
-        v.use_test_pattern(False)
-        time.sleep(1.0)
-        st = v.input.status()
-        check("HDMI input reported not good while nothing is connected", not st["hdmi_good"], f"locked={st['hdmi_locked']}")
-        say("   waiting for the 5 s fallback timeout ...")
-        time.sleep(5.5)
-        st = v.input.status()
-        check("test pattern took over after 5 s", st["fallback_active"] and st["active_source"] == "test",
-              f"fallback={st['fallback_active']} source={st['active_source']}")
+        say("== noise filter (register writes accepted; the grain is on the monitor)")
+        for amount in (0, 60, 255):
+            v.set_filter("noise", noise=amount)
+            time.sleep(0.2)
         a = v.input.status()["out_frames"]
         time.sleep(0.5)
-        check("output keeps running during fallback", v.input.status()["out_frames"] - a >= 20)
+        check("video keeps flowing at full noise", v.input.status()["out_frames"] - a >= 20)
+        check("noise setting reads back", v.filter.noise() == 255 and v.filter.mode() == "noise")
+        v.set_filter("passthrough")
+
+        say("== temporal average (running sum in DDR)")
+        v.input.set_source("test")                     # the colour bars are static, so the DDR contents are predictable
+        time.sleep(0.5)
+        v.set_temporal_average(16)
+        time.sleep(1.2)                                # 16 frames fit in well under a second
+        st = v.tavg.status()
+        check("the average window fills to N=16", st["depth"] == 16, str(st))
+        a = v.input.status()["out_frames"]
+        time.sleep(0.5)
+        check("video keeps flowing at about 60 fps with the average on", v.input.status()["out_frames"] - a >= 25,
+              f"{v.input.status()['out_frames'] - a} frames in 0.5 s")
+        for name, ch in (("live S2MM", v.vdma_live.status("s2mm")), ("live MM2S", v.vdma_live.status("mm2s"))):
+            check(f"VDMA {name} still without errors", not ch["errors"], str(ch["errors"]))
+        # what the hardware wrote: the history ring holds brightness, the sum frame holds 16 x brightness
+        buf = v._tavgbuf.array
+        slots = v.history_frames
+        ring = buf[:slots * R.TAVG_LUMA_FRAME_BYTES].reshape(slots, R.HEIGHT, R.WIDTH)
+        sums = buf[slots * R.TAVG_LUMA_FRAME_BYTES:].view("<u2").reshape(R.HEIGHT, R.WIDTH)
+        bar_rgb = [(255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0), (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)]
+        bar_luma = [(77 * r + 150 * g + 29 * b) >> 8 for r, g, b in bar_rgb]
+        w8 = R.WIDTH // 8
+        samples = [(y, i) for i in range(8) for y in range(8, R.HEIGHT, 40)]      # the moving box covers well under 5%
+        ring_ok = sum(all(int(ring[k, y, i * w8 + w8 // 2]) == bar_luma[i] for k in range(slots)) for y, i in samples)
+        sum_ok = sum(int(sums[y, i * w8 + w8 // 2]) == 16 * bar_luma[i] for y, i in samples)
+        check("history ring holds the brightness of the colour bars in all 16 slots", ring_ok >= 0.9 * len(samples),
+              f"{ring_ok} of {len(samples)} sampled pixels")
+        check("sum frame holds exactly 16 x brightness", sum_ok >= 0.9 * len(samples), f"{sum_ok} of {len(samples)} sampled pixels")
+        v.set_temporal_average(4)                      # changing N restarts the window
+        time.sleep(0.3)
+        st = v.tavg.status()
+        check("changing N restarts the window and it refills to 4", st["depth"] == 4, str(st))
+        v.set_temporal_average(None)
+        time.sleep(0.2)
+        check("the average switches off", not v.tavg.enabled())
+        v.input.set_source("hdmi")
+
+        say("== HDMI input")
+        v.use_test_pattern(False)
+        time.sleep(1.5)
+        st = v.input.status()
+        if st["hdmi_good"]:
+            say("   a live 1280x720 HDMI source is connected: checking passthrough instead of the no-signal fallback")
+            a = v.input.status()
+            time.sleep(1.0)
+            b = v.input.status()
+            check("HDMI frames arrive at about 60/s", 50 <= b["hdmi_frames"] - a["hdmi_frames"] <= 70,
+                  f"{b['hdmi_frames'] - a['hdmi_frames']} frames in 1 s")
+            check("HDMI is what is being shown", b["active_source"] == "hdmi" and not b["fallback_active"])
+            check("output runs at about 60 fps from HDMI", 50 <= b["out_frames"] - a["out_frames"] <= 70)
+        else:
+            say("   fallback: HDMI selected with no signal connected")
+            check("HDMI input reported not good while nothing is connected", not st["hdmi_good"], f"locked={st['hdmi_locked']}")
+            say("   waiting for the 5 s fallback timeout ...")
+            time.sleep(5.5)
+            st = v.input.status()
+            check("test pattern took over after 5 s", st["fallback_active"] and st["active_source"] == "test",
+                  f"fallback={st['fallback_active']} source={st['active_source']}")
+            a = v.input.status()["out_frames"]
+            time.sleep(0.5)
+            check("output keeps running during fallback", v.input.status()["out_frames"] - a >= 20)
 
         say("== final state")
         for k, val in v.status().items():
