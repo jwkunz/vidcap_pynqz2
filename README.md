@@ -41,7 +41,9 @@ So expect a bring-up session on first power-up. The "First run" section below li
    ```
    make deploy BOARD=xilinx@<board-ip>          # builds the package and scp's it (asks for the password)
    ```
-3. Open Jupyter at `http://<board-ip>:9090`, go to `vidcap/`, and run **`vidcap_demo.ipynb`**.
+3. Open Jupyter at `http://<board-ip>:9090`, go to `vidcap/`, and open **`vidcap_interactive.ipynb`** for a
+   control panel (source, filters, timestamp, snapshot, video memory, live status), or **`vidcap_demo.ipynb`**
+   for the same features as plain Python.
 
 Or from any Python on the board:
 
@@ -88,9 +90,9 @@ src/                   everything that is hand-written (this is what is in git)
     vc_snapshot/         single-frame capture                     (HLS C++)
     vc_common/           shared AXI-Lite bridge, video header, run_xsim.sh, run_hls.sh
   overlay/             Vivado block design (Tcl), pin constraints, build scripts
-  drivers/vidcap/      Python drivers (no PYNQ needed for the logic)
+  drivers/vidcap/      Python drivers (no PYNQ needed for the logic) and the ipywidgets panel (ui.py)
   drivers/tests/       driver unit tests
-  notebooks/           demo notebook
+  notebooks/           interactive control panel and plain-Python demo
 docs/
   requirements.md      requirements, architecture, traceability, known limits
   register_map.md      every register of every block: the hardware contract

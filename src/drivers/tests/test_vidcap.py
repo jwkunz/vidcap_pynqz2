@@ -314,3 +314,135 @@ class TestRegisterMapsMatchGenerated(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------------------------
+try:
+    import ipywidgets  # noqa: F401
+    HAVE_WIDGETS = True
+except ImportError:
+    HAVE_WIDGETS = False
+
+
+@unittest.skipUnless(HAVE_WIDGETS, "ipywidgets not installed")
+class TestPanel(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from vidcap import ui
+        self.ui = ui
+        self.v, self.mm = _fake_pipeline()
+        self.v.start(sync_time=False)
+        self.mm["rtc"].regs[R.RTC_DATE] = 0x070B_141A
+        self.mm["rtc"].regs[R.RTC_TIME] = 0x0003_2909
+
+        def on_trigger(val, m):                       # a snapshot core that completes at once
+            m.regs[R.SNAP_STATUS] = (((m.regs.get(R.SNAP_STATUS, 0) >> 8) + 1) & 0xFF) << 8
+            self.v._snapbuf.array[:] = 0
+            self.v._snapbuf.array[10, 20] = (3, 2, 1)
+        self.mm["snap"].on_write[R.SNAP_TRIGGER] = on_trigger
+        self.tmp = tempfile.mkdtemp()
+        self.panel = ui.build_panel(self.v, refresh_s=0.05, snapshot_dir=self.tmp)
+        self.w = self.panel.widgets
+        self.addCleanup(self.panel.stop)
+
+    def log_text(self):
+        return "\n".join(self.panel.messages)
+
+    def test_filter_controls(self):
+        self.w["mode"].value = "sobel"
+        self.assertEqual(self.mm["filt"].regs[R.FILT_MODE], 4)
+        self.w["threshold"].value = 77
+        self.assertEqual(self.mm["filt"].regs[R.FILT_THRESHOLD], 77)
+        self.assertEqual(self.mm["filt"].regs[R.FILT_MODE], 4, "mode kept when only the threshold moves")
+
+    def test_source_and_fallback(self):
+        self.w["source"].value = "test"
+        self.assertTrue(self.mm["isel"].regs[R.ISEL_CTRL] & R.ISEL_CTRL_SRC_TPG)
+        self.w["fallback"].value = False
+        self.assertFalse(self.mm["isel"].regs[R.ISEL_CTRL] & R.ISEL_CTRL_FALLBACK_EN)
+        self.w["source"].value = "hdmi"
+        self.assertFalse(self.mm["isel"].regs[R.ISEL_CTRL] & R.ISEL_CTRL_SRC_TPG)
+
+    def test_timestamp_controls(self):
+        self.w["ts_scale"].value = 3
+        self.w["ts_margin"].value = 40
+        self.w["ts_fg"].value = "#ff8000"
+        r = self.mm["ovl"].regs
+        self.assertEqual((r[R.OVL_SCALE], r[R.OVL_MARGIN], r[R.OVL_FG]), (3, 40, 0xFF8000))
+        self.assertEqual(r[R.OVL_BG_EN], 1)
+        self.w["ts_clear"].value = True
+        self.assertEqual(r[R.OVL_BG_EN], 0, "transparent background")
+        self.w["ts_on"].value = False
+        self.assertEqual(r[R.OVL_ENABLE], 0)
+
+    def test_video_memory_and_revert(self):
+        self.w["display"].value = "vmem"
+        self.assertEqual(self.mm["vmux"].regs[R.VMUX_SEL], 1)
+        self.assertEqual(self.mm["vdma_vmem"].regs[R.VDMA_PARK_PTR] & 0x1F, 1, "wrote the hidden buffer and flipped")
+        self.w["display"].value = "live"
+        self.assertEqual(self.mm["vmux"].regs[R.VMUX_SEL], 0)
+        # no snapshot yet: choosing it must fail visibly and put the toggle back
+        self.w["image"].value = "Last snapshot"
+        self.w["display"].value = "vmem"
+        self.assertEqual(self.w["display"].value, "live")
+        self.assertIn("no snapshot yet", self.log_text())
+
+    def test_snapshot_and_save(self):
+        self.assertTrue(self.w["save"].disabled)
+        self.w["snap"].click()
+        self.assertFalse(self.w["save"].disabled)
+        self.assertEqual(self.panel.widgets["snap_info"].value[:8], "captured")
+        self.assertEqual(self.w["snap"].description, "Capture snapshot")
+        self.assertTrue(bytes(self.w["snap_img"].value).startswith(b"\x89PNG"), "preview is a PNG")
+        self.w["save"].click()
+        saved = os.listdir(self.tmp)
+        self.assertEqual(len(saved), 1)
+        self.assertTrue(saved[0].startswith("snap_") and saved[0].endswith(".png"))
+        # a saved snapshot can be sent back to the display
+        self.w["image"].value = "Last snapshot"
+        self.w["display"].value = "vmem"
+        self.assertEqual(self.w["display"].value, "vmem")
+
+    def test_status_text(self):
+        self.mm["isel"].regs[R.ISEL_STATUS] = R.ISEL_ST_LOCKED | R.ISEL_ST_GOOD
+        self.mm["isel"].regs[R.ISEL_MEASURED] = (720 << 16) | 1280
+        self.panel.refresh()
+        text = self.w["status"].value
+        self.assertIn("good", text)
+        self.assertIn("1280x720", text)
+        self.assertIn("2026-11-07 09:41:03", text)
+        self.assertIn("none", text, "no DMA errors")
+        self.mm["vdma_live"].regs[R.VDMA_S2MM_SR] = 1 << 7
+        self.panel.refresh()
+        self.assertIn("SOF early", self.w["status"].value)
+
+    def test_status_survives_garbage_clock(self):
+        self.mm["rtc"].regs[R.RTC_DATE] = 0
+        self.panel.refresh()
+        self.assertIn("unreadable", self.w["status"].value)
+
+    def test_background_refresh_runs_and_stops(self):
+        import time as _t
+        self.w["status"].value = "stale"
+        _t.sleep(0.3)
+        self.assertNotEqual(self.w["status"].value, "stale", "the refresh thread updates the status")
+        self.panel.stop()
+
+
+class TestPanelHelpers(unittest.TestCase):
+    def test_images_have_the_right_shape(self):
+        from vidcap import ui
+        for make in (ui.image_gradient, ui.image_bars, ui.image_checker):
+            img = make()
+            self.assertEqual((img.shape, img.dtype), ((R.HEIGHT, R.WIDTH, 3), np.dtype("uint8")))
+
+    def test_bars_are_bgr_in_memory(self):
+        from vidcap import ui
+        bars = ui.image_bars()
+        self.assertEqual(tuple(bars[0, 0]), (255, 255, 255), "white")
+        self.assertEqual(tuple(bars[0, R.WIDTH // 8 + 1]), (0, 255, 255), "yellow = B 0, G 255, R 255")
+        self.assertEqual(tuple(bars[0, 5 * (R.WIDTH // 8) + 1]), (0, 0, 255), "red = R 255 in the last byte")
+
+    def test_hex_colour(self):
+        from vidcap import ui
+        self.assertEqual(ui.hex_to_rgb("#ff8000"), (255, 128, 0))

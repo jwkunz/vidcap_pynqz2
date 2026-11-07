@@ -5,6 +5,7 @@ from .blocks import (Filter, InputSelect, Rtc, Snapshot, StreamMux, TimestampOve
                      VidcapError)
 from .memory import FrameBuffer, HeapAllocator, PynqAllocator, ReservedRegion
 from .pipeline import Vidcap
+# the interactive panel is in vidcap.ui (imports ipywidgets only when used)
 
 __version__ = "1.0.0"
 __all__ = ["Vidcap", "regs", "Mmio", "PynqMmio", "DevMemMmio", "FakeMmio", "Rtc", "InputSelect",

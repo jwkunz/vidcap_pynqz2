@@ -127,6 +127,12 @@ class Vidcap:
         return img[..., ::-1].copy() if rgb else img
 
     # ------------------------------------------------------------------ diagnostics
+    def _clock_text(self) -> str:
+        try:
+            return str(self.rtc.get())
+        except ValueError:                         # registers held an impossible date: report, do not crash
+            return "unreadable"
+
     def status(self) -> Dict[str, object]:
         return {
             "input": self.input.status(),
@@ -134,7 +140,7 @@ class Vidcap:
             "display": self.mux.active(),
             "filter": self.filter.mode(),
             "timestamp": self.overlay.enabled(),
-            "clock": str(self.rtc.get()),
+            "clock": self._clock_text(),
             "clock_was_set": self.rtc.was_set,
             "vdma_live_s2mm": self.vdma_live.status("s2mm"),
             "vdma_live_mm2s": self.vdma_live.status("mm2s"),
