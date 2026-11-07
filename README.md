@@ -80,6 +80,7 @@ The input advertises a 720p-only EDID, so a computer or camera will pick 1280x72
 | Picture but wrong colours | channel order: bars should read white, yellow, cyan, green, magenta, red, blue, black |
 | Frozen or torn picture | `v.status()` shows VDMA error bits (SOF/EOL early/late, slave/decode errors) |
 | `stream mux did not switch` | the selected reader is not producing frames (VDMA not running) |
+| Picture frozen, snapshots never finish, `v.snapshot()` times out | run `sudo python3 -m vidcap.diagnose` in the `vidcap/` folder (read-only). If it says STALLED and a DMA reset times out, the board's memory port is wedged: shut down the notebooks and **reboot the board** (a bitstream reload does not clear it). Use one notebook at a time |
 
 Status LEDs: **LD0** HDMI good, **LD1** fallback active, **LD2** test pattern selected, **LD3** output clock locked.
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import warnings
 from datetime import datetime
 from typing import Callable, Dict, Optional
 
@@ -42,11 +43,24 @@ class Vidcap:
 
     # ------------------------------------------------------------------ construction
     @classmethod
-    def on_pynq(cls, bitfile: str = "vidcap.bit", download: bool = True, allocator=None) -> "Vidcap":
-        """Load the bitstream through PYNQ and return a ready (not yet started) pipeline."""
+    def on_pynq(cls, bitfile: str = "vidcap.bit", download: bool = True, allocator=None,
+                protect: bool = True) -> "Vidcap":
+        """Load the bitstream through PYNQ and return a ready (not yet started) pipeline.
+
+        Only ONE process (one notebook kernel) should drive the hardware. If another process has the design
+        loaded, its DMA engines are stopped first (protect=True) so that replacing the bitstream cannot wedge
+        the board's memory port; that other process's Vidcap object is then stale and must be restarted.
+        """
         from .backend import PynqMmio
         from .memory import PynqAllocator
         if download:
+            if protect:
+                from . import safety
+                if safety.design_loaded_since_boot(bitfile):
+                    actions = safety.stop_running_design()
+                    warnings.warn("vidcap was already loaded (another notebook or script?). Its DMA engines were "
+                                  f"stopped ({'; '.join(actions)}); restart that kernel, it no longer controls the "
+                                  "hardware.", RuntimeWarning, stacklevel=2)
             from pynq import Overlay
             cls._overlay = Overlay(bitfile)          # keeps the overlay (and its .hwh) alive
         return cls(lambda base: PynqMmio(base, R.WINDOW), allocator or PynqAllocator())

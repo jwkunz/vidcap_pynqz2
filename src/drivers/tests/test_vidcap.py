@@ -459,3 +459,115 @@ class TestPanelHelpers(unittest.TestCase):
     def test_hex_colour(self):
         from vidcap import ui
         self.assertEqual(ui.hex_to_rgb("#ff8000"), (255, 128, 0))
+
+
+class TestSafety(unittest.TestCase):
+    def test_trusts_pynq_state_only_if_written_after_boot(self):
+        import tempfile
+        from vidcap import safety
+        f = tempfile.NamedTemporaryFile(delete=False)
+        f.close()
+        mtime = os.path.getmtime(f.name)
+        name = "/home/xilinx/jupyter_notebooks/vidcap/vidcap.bit"
+        self.assertTrue(safety.design_loaded_since_boot("vidcap.bit", f.name, mtime - 100, name))
+        self.assertFalse(safety.design_loaded_since_boot("vidcap.bit", f.name, mtime + 100, name),
+                         "state file older than this boot: the FPGA was reset, do not touch it")
+        self.assertFalse(safety.design_loaded_since_boot("vidcap.bit", f.name, mtime - 100, "/x/other.bit"))
+        self.assertFalse(safety.design_loaded_since_boot("vidcap.bit", "/nonexistent/state", 0, name),
+                         "no state file: not loaded")
+        os.unlink(f.name)
+
+    def _vdma_pair(self, halts_on_rs_clear=True, honours_reset=True):
+        """Fake VDMAs whose channels behave like (or deliberately unlike) the real ones."""
+        mm = {}
+
+        def make(name):
+            m = FakeMmio()
+            m.regs[R.VDMA_S2MM_CR] = m.regs[R.VDMA_MM2S_CR] = R.VDMA_CR_RS
+            for cr, sr in ((R.VDMA_S2MM_CR, R.VDMA_S2MM_SR), (R.VDMA_MM2S_CR, R.VDMA_MM2S_SR)):
+                m.regs[sr] = 0                                              # running
+
+                def on_write(v, mm_, cr=cr, sr=sr):
+                    if v & R.VDMA_CR_RESET:
+                        if honours_reset:
+                            mm_.regs[sr] = R.VDMA_SR_HALTED
+                            mm_.regs[cr] = v & ~R.VDMA_CR_RESET
+                    elif not v & R.VDMA_CR_RS and halts_on_rs_clear:
+                        mm_.regs[sr] = R.VDMA_SR_HALTED
+                m.on_write[cr] = on_write
+            mm[name] = m
+            return m
+
+        def mmio_for(base):
+            name = next(n for n, b in R.BASES.items() if b == base)
+            return mm.get(name) or make(name)
+        return mmio_for, mm
+
+    def test_stops_every_dma_channel(self):
+        from vidcap import safety
+        mmio_for, mm = self._vdma_pair()
+        done = safety.stop_running_design(mmio_for, timeout_s=0.05)
+        self.assertEqual(len(done), 3)
+        self.assertTrue(all(d.endswith("stopped") for d in done), done)
+        self.assertTrue(mm["vdma_live"].regs[R.VDMA_S2MM_SR] & R.VDMA_SR_HALTED)
+        self.assertTrue(mm["vdma_vmem"].regs[R.VDMA_MM2S_SR] & R.VDMA_SR_HALTED)
+
+    def test_forces_a_channel_that_will_not_halt(self):
+        from vidcap import safety
+        mmio_for, _ = self._vdma_pair(halts_on_rs_clear=False)
+        done = safety.stop_running_design(mmio_for, timeout_s=0.05)
+        self.assertTrue(all(d.endswith("reset") for d in done), done)
+
+    def test_refuses_to_continue_if_a_dma_cannot_be_stopped(self):
+        from vidcap import safety
+        mmio_for, _ = self._vdma_pair(halts_on_rs_clear=False, honours_reset=False)
+        with self.assertRaises(VidcapError) as cm:
+            safety.stop_running_design(mmio_for, timeout_s=0.02)
+        self.assertIn("Reboot", str(cm.exception))
+
+    def test_idle_channels_are_left_alone(self):
+        from vidcap import safety
+        mmio_for, mm = self._vdma_pair()
+        for name in ("vdma_live", "vdma_vmem"):
+            m = mmio_for(R.BASES[name])
+            m.regs[R.VDMA_S2MM_SR] = m.regs[R.VDMA_MM2S_SR] = R.VDMA_SR_HALTED
+        before = len(mm["vdma_live"].writes())
+        done = safety.stop_running_design(mmio_for, timeout_s=0.02)
+        self.assertTrue(all(d.endswith("idle") for d in done))
+        self.assertEqual(len(mm["vdma_live"].writes()), before, "nothing written to a halted DMA")
+
+
+class TestDiagnose(unittest.TestCase):
+    def _s(self, **kw):
+        base = dict(ctrl=0x2, status=0b0011, w=1280, h=720, hdmi_frames=1, out_frames=1, mux_frames=1, mux_status=0,
+                    s2mm_sr=0x11000, mm2s_sr=0x11000, vmem_sr=0x11000, snap_status=0, snap_trigger=0, snap_ack=0,
+                    filter=0, overlay=1, rate_hdmi=60.0, rate_out=60.0, rate_mux=60.0)
+        base.update(kw)
+        return base
+
+    def test_healthy(self):
+        from vidcap import diagnose
+        self.assertTrue(diagnose.verdict(self._s())[0].startswith("OK"))
+
+    def test_wedge_signature_is_called_out(self):
+        from vidcap import diagnose
+        v = diagnose.verdict(self._s(rate_out=0.0, status=0b1011, snap_trigger=3))
+        self.assertTrue(v[0].startswith("STALLED"))
+        self.assertTrue(any("stuck on the other one" in x or "snapshots were requested" in x for x in v))
+
+    def test_no_signal_and_errors(self):
+        from vidcap import diagnose
+        v = diagnose.verdict(self._s(status=0, rate_hdmi=0.0, rate_out=0.0, ctrl=0x2))
+        self.assertTrue(any("no signal" in x for x in v))
+        v = diagnose.verdict(self._s(s2mm_sr=(1 << 7) | 0x11000))
+        self.assertTrue(any("SOF early" in x for x in v))
+
+    def test_sample_reads_only(self):
+        from vidcap import diagnose
+        mm = {}
+        def mmio_for(base):
+            name = next(n for n, b in R.BASES.items() if b == base)
+            mm[name] = FakeMmio(); return mm[name]
+        s = diagnose.sample(mmio_for, seconds=0.01)
+        self.assertIn("rate_out", s)
+        self.assertTrue(all(not m.writes() for m in mm.values()), "diagnose must never write a register")
