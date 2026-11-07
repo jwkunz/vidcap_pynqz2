@@ -216,6 +216,8 @@ def _fake_pipeline():
         if name.startswith("vdma"):
             for cr in (R.VDMA_S2MM_CR, R.VDMA_MM2S_CR):
                 m.on_write[cr] = lambda v, mm, cr=cr: mm.regs.__setitem__(cr, v & ~R.VDMA_CR_RESET)
+            for sr in (R.VDMA_S2MM_SR, R.VDMA_MM2S_SR):      # status bits are write-1-to-clear
+                m.on_write[sr] = lambda v, mm, sr=sr, prev=None: mm.regs.__setitem__(sr, 0)
         by_base[name] = m
         return m
     v = Vidcap(mmio_for, HeapAllocator())
@@ -243,6 +245,17 @@ class TestPipeline(unittest.TestCase):
         self.assertLess(pos[("filt", R.FILT_MODE)], pos[("vdma_live", R.VDMA_S2MM_VSIZE)])
         self.assertLess(pos[("snap", R.SNAP_MEM_LO)], pos[("vdma_live", R.VDMA_S2MM_VSIZE)])
         self.assertLess(pos[("vdma_live", R.VDMA_S2MM_VSIZE)], pos[("vdma_live", R.VDMA_MM2S_VSIZE)])
+
+    def test_start_clears_the_startup_error_flags(self):
+        v, mm = _fake_pipeline()
+        v.start(sync_time=False)
+        mask = sum(1 << b for b in R.VDMA_SR_ERRORS)
+        self.assertIn((R.VDMA_S2MM_SR, mask), mm["vdma_live"].writes())
+        self.assertIn((R.VDMA_MM2S_SR, mask), mm["vdma_live"].writes())
+        self.assertIn((R.VDMA_MM2S_SR, mask), mm["vdma_vmem"].writes())
+        # ... and only after the engines were started
+        w = mm["vdma_live"].writes()
+        self.assertLess(w.index((R.VDMA_S2MM_VSIZE, 720)), w.index((R.VDMA_S2MM_SR, mask)))
 
     def test_wrong_bitstream_fails_early(self):
         def mmio_for(base):

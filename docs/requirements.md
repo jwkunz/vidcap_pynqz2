@@ -1,8 +1,8 @@
 # vidcap_pynqz2 - Requirements and design (v1.0.0)
 
 Status: **v1.0.0.** Everything below is implemented and verified in simulation and by a timing-clean
-Vivado build. **Nothing has yet been run on the board**; the "Hardware" column in section 4 says so
-requirement by requirement.
+Vivado build. It has also been run on a PYNQ-Z2 with the built-in test pattern as the only video source
+(section 5). **A real HDMI source and a monitor have not been tried.**
 
 ## 1. Goal
 
@@ -98,7 +98,7 @@ Control: PS → AXI-Lite → a register block on every core. Interrupts: AXI INT
 
 ## 4. Traceability
 
-"Verified by" names the test that exists in this repository. **Hardware: none of these have run on the board.**
+"Verified by" names the test that exists in this repository. Section 5 lists what the board run adds.
 
 | Requirement | Implemented in | Verified by (simulation / build) |
 |---|---|---|
@@ -116,20 +116,40 @@ Control: PS → AXI-Lite → a register block on every core. Interrupts: AXI INT
 | TS-1..6 | `vc_rtc`, `vc_overlay` | `tb_vc_rtc` (14 checks: leap years, 1900/2000, rollovers, bad dates, CPS trim, power-up); `vc_overlay` C-sim + co-simulation |
 | SW-1, SW-2 | `src/drivers`, `docs/register_map.md` | 25 driver unit tests, including a check that every HLS register offset matches the generated headers |
 
-## 5. Resources and timing (Vivado 2025.2, xc7z020clg400-1)
+## 5. Resources, timing and board results (Vivado 2025.2, xc7z020clg400-1)
 
-See `workspace/vivado/out/` after `make overlay` (`utilization_impl.rpt`, `timing_summary.rpt`).
+Implementation: 10,285 LUTs (19%), 14,538 registers (14%), 18.5 BRAM tiles (13%), 28 DSPs (13%); setup slack
++1.11 ns, hold slack +0.009 ns, 0 DRC errors. See `workspace/vivado/out/` after `make overlay`.
 The build **fails** if setup or hold timing is not met.
+
+**On the board** (`src/drivers/tests/hw_smoke.py`, test pattern only, 23 of 23 checks pass):
+
+| Verified on hardware | Evidence |
+|---|---|
+| Bitstream loads; `rtc`, `input_sel`, `stream_mux` answer with the right IDs | first AXI reads |
+| Test pattern flows through input select, snapshot, VDMA write and read, mux | 60 frames/s measured at both input select and mux |
+| DMA writes correct frames to the live ring | all 3 frame buffers hold the colour bars |
+| Snapshot (REQ-SNAP) | 720x1280x3; bars in the right order and **B,G,R byte order**; box moves between captures; repeated captures; interrupt acknowledge; about 40 ms |
+| Video memory (REQ-VMEM-1, 2) | mux switches to it, reader delivers 60 frames/s, second buffer flip accepted, no VDMA errors |
+| Hardware clock (REQ-TS-1, 4) | within 0.3-0.8 s of the board clock after a set and 2 s |
+| Fallback (REQ-IN-3, 5) | HDMI reported not good with nothing connected; test pattern took over after 5 s; output kept running |
+| Stability | board did not reset across two bitstream loads and the runs |
+
+One start-up behaviour was found and handled: the write channel flags a one-time `internal error / SOF late` because
+video is already flowing when it starts. The flags do not return once cleared (checked over 2 s, about 120 frames),
+and `Vidcap.start()` now clears them so `status()` only shows later errors.
 
 ## 6. Known limits and things to confirm on hardware
 
-1. **Not yet run on the board.** Expect bring-up debugging (see README "First run").
-2. **VDMA register programming** follows Xilinx PG020 and PYNQ's static genlock pairing (S2MM master,
-   MM2S slave). It is unproven here; `Vidcap.status()` reports the VDMA error bits to help.
-3. **Video-memory flip** relies on the VDMA applying a park-pointer write at a frame boundary.
+1. **Not yet tried with a real HDMI source or a monitor.** Everything on the HDMI connectors, and what the picture
+   looks like, is unverified (see README "First run").
+2. **VDMA programming** now runs on the board without errors, but only with the test pattern.
+3. **Video-memory flip**: the reader runs and the flip is accepted; that the displayed image switches without
+   tearing has not been looked at on a monitor.
 4. **HDMI output hot-plug pin** (`hdmi_out_hpd`, R19) is driven high, as in PYNQ's base design.
-5. **Colour order** (`{R,B,G}` at the Digilent IP, swapped in `vc_input_sel` and `vc_axis_swap_gb`) is
-   derived from the IP source and PYNQ's own `color_swap` configuration; verify with the colour bars.
+5. **Colour order**: the internal `{R,G,B}` path and the B,G,R byte order in memory are confirmed on the board
+   (snapshot colour bars). The two swaps at the HDMI edges (`vc_input_sel` on input, `vc_axis_swap_gb` on output)
+   are derived from the IP source and PYNQ's `color_swap` configuration, and need an HDMI source and a monitor to confirm.
 6. **Interrupts** are wired (HLS snapshot + three VDMA lines → AXI INTC → PS) but the Python drivers poll.
 7. **Clock drift** of the timestamp is that of the board's 50 MHz PS oscillator; use `Rtc.cycles_per_second`.
 8. **A source that ignores the 720p EDID** (for example 1080p) gives no lock; the board falls back to the

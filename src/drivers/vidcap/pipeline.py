@@ -82,6 +82,14 @@ class Vidcap:
         self.vdma_live.start_mm2s([f.phys for f in self._live], genlock_slave=True)
         self.vdma_vmem.start_mm2s([f.phys for f in self._vmem], park=0)
 
+        # The video stream is already flowing when the write channel starts, so it begins in the middle
+        # of a frame and flags a one-time "internal error / SOF late". Measured on the board: the flags
+        # do not come back once cleared. Let a few frames pass, then clear them, so that status() only
+        # ever reports errors that happen after start-up.
+        time.sleep(4 * FRAME_TIME_S)
+        for vdma, ch in ((self.vdma_live, "s2mm"), (self.vdma_live, "mm2s"), (self.vdma_vmem, "mm2s")):
+            vdma.clear_errors(ch)
+
     def stop(self) -> None:
         for v, ch in ((self.vdma_live, "s2mm"), (self.vdma_live, "mm2s"), (self.vdma_vmem, "mm2s")):
             v.reset(ch)

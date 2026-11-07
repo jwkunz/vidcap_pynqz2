@@ -18,7 +18,7 @@ HDMI in ─► [test pattern / HDMI select] ─► snapshot ─► DDR ─► fi
 * **Test pattern:** colour bars with a moving box. Selectable by software, and automatic if the HDMI
   input is missing or not 720p for 5 seconds, so the monitor never goes blank.
 
-## Status: verified in simulation, not yet run on a board
+## Status: verified in simulation and on the board (test pattern); HDMI in/out not yet tried
 
 | What | State |
 |---|---|
@@ -26,10 +26,18 @@ HDMI in ─► [test pattern / HDMI select] ─► snapshot ─► DDR ─► fi
 | HLS cores (filter, overlay, snapshot) | C-simulation against golden models **and** C/RTL co-simulation |
 | Python drivers | 25 unit tests against a fake register file, including a check that every register offset matches what the HLS tools generated |
 | Full design | builds from source; timing met (setup +1.1 ns, hold +0.01 ns); 19% LUTs, 13% BRAM |
-| **On the board** | **not done yet** |
+| **On the board** (`hw_smoke.py`, no HDMI source) | 23 of 23 checks pass: bitstream loads, every block answers, test pattern at 60 fps through the DMA ring, snapshot returns the colour bars in the right byte order, video-memory flip, hardware clock, 5-second fallback |
+| **Not yet verified** | a real HDMI source on the input, a monitor on the output (picture, filter effects, timestamp text, the HDMI colour-order swaps), interrupts, the browser control panel |
 
-So expect a bring-up session on first power-up. The "First run" section below lists what to check, and
-`docs/requirements.md` section 6 lists the specific things that simulation cannot prove.
+The board check can be repeated at any time (needs root and the PYNQ environment):
+
+```
+cd /home/xilinx/jupyter_notebooks/vidcap
+sudo bash -c 'source /etc/profile.d/boardname.sh /etc/profile.d/xrt_setup.sh /etc/profile.d/pynq_venv.sh; python3 -u hw_smoke.py'
+```
+
+The "First run" section below lists what to check when you connect HDMI, and `docs/requirements.md` section 6
+lists what is still unproven.
 
 ## Quick start (on the board)
 
