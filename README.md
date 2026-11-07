@@ -66,6 +66,12 @@ v.show_live()
 v.status()
 ```
 
+**Time zone:** the on-screen clock shows the board's local time, and the board defaults to UTC. `make deploy` sets
+the board's zone to your computer's (override with `TZ_NAME=America/Chicago`, or `TZ_NAME=` to leave it alone). To show
+another zone without touching the board, use `v.start(tz="Europe/London")` or `v.sync_time(tz=...)`, or the **Time zone**
+box in the control panel. The hardware clock keeps plain wall time, so press **Set clock** (or call `sync_time()`)
+after a daylight-saving change.
+
 Plug an HDMI source (720p) into the **input** connector and a monitor into the **output** connector.
 The input advertises a 720p-only EDID, so a computer or camera will pick 1280x720 by itself.
 

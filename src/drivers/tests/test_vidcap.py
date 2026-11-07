@@ -290,6 +290,40 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(tuple(img[5, 5]), (9, 8, 7), "result must not alias the DMA buffer")
 
 
+class TestTimeZone(unittest.TestCase):
+    def _clock(self, mm):
+        return Rtc.decode(mm["rtc"].regs[R.RTC_DATE], mm["rtc"].regs[R.RTC_TIME])
+
+    def test_zone_changes_the_displayed_time(self):
+        v, mm = _fake_pipeline()
+        v.sync_time("UTC")
+        utc = self._clock(mm)
+        v.sync_time("Asia/Tokyo")
+        tokyo = self._clock(mm)
+        self.assertAlmostEqual((tokyo - utc).total_seconds(), 9 * 3600, delta=5)
+        self.assertEqual(v.tz, "Asia/Tokyo", "remembered for later syncs")
+        v.sync_time("")                                   # back to the board's own zone
+        self.assertIsNone(v.tz)
+
+    def test_start_accepts_a_zone(self):
+        v, mm = _fake_pipeline()
+        v.start(tz="America/New_York")
+        from zoneinfo import ZoneInfo
+        expect = datetime.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+        self.assertAlmostEqual((self._clock(mm) - expect).total_seconds(), 0, delta=5)
+
+    def test_unknown_zone_is_a_clear_error(self):
+        v, _ = _fake_pipeline()
+        with self.assertRaises(ValueError) as cm:
+            v.sync_time("Mars/Olympus_Mons")
+        self.assertIn("IANA", str(cm.exception))
+
+    def test_drift_is_measured_in_the_same_zone(self):
+        v, mm = _fake_pipeline()
+        v.sync_time("Asia/Tokyo")
+        self.assertLess(abs(v.clock_drift()), 3)          # would be about 9 hours if it compared with local time
+
+
 class TestRegisterMapsMatchGenerated(unittest.TestCase):
     """The HLS tools generate the true register offsets; they must agree with regs.py."""
 
@@ -428,6 +462,18 @@ class TestPanel(unittest.TestCase):
         self.mm["vdma_live"].regs[R.VDMA_S2MM_SR] = 1 << 7
         self.panel.refresh()
         self.assertIn("SOF early", self.w["status"].value)
+
+    @unittest.skipUnless(HAVE_WIDGETS, "ipywidgets not installed")
+    def test_panel_time_zone_box(self):
+        self.w["tz"].value = "Asia/Tokyo"
+        self.w["sync"].click()
+        self.assertEqual(self.v.tz, "Asia/Tokyo")
+        self.w["tz"].value = "Nowhere/Land"
+        self.w["sync"].click()
+        self.assertIn("unknown time zone", self.log_text())
+        self.w["tz"].value = ""
+        self.w["sync"].click()
+        self.assertIsNone(self.v.tz)
 
     def test_status_survives_garbage_clock(self):
         self.mm["rtc"].regs[R.RTC_DATE] = 0

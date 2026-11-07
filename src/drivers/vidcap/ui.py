@@ -71,7 +71,7 @@ def status_html(v) -> str:
     size = "x".join(str(n) for n in inp["hdmi_size"])
     errs = st["vdma_live_s2mm"]["errors"] + st["vdma_live_mm2s"]["errors"] + st["vdma_vmem_mm2s"]["errors"]
     try:
-        drift = f"{v.rtc.drift_against():+.2f} s vs this board"
+        drift = f"{v.clock_drift():+.2f} s vs this board" + (f", zone {v.tz}" if v.tz else "")
     except Exception:                                           # clock not yet readable: not fatal
         drift = "n/a"
     rows = [
@@ -169,8 +169,10 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
     for w in (ts_on, ts_scale, ts_margin, ts_fg, ts_bg, ts_clear):
         w.observe(guarded(apply_ts), names="value")
 
+    tz_box = W.Text(value=v.tz or "", placeholder="board's own zone", description="Time zone",
+                    layout=W.Layout(width="22em"))
     sync = W.Button(description="Set clock from this board", icon="clock-o", layout=W.Layout(width="14em"))
-    sync.on_click(guarded(lambda _: v.sync_time()))
+    sync.on_click(guarded(lambda _: v.sync_time(tz=tz_box.value.strip())))
 
     # ---- snapshot
     snap_btn = W.Button(description="Capture snapshot", icon="camera", button_style="primary", layout=W.Layout(width="14em"))
@@ -220,7 +222,7 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
         W.VBox([source, fallback]),
         W.VBox([display_mode, image_pick]),
         W.HTML("<b>Filter</b>"), W.HBox([mode, threshold]),
-        W.HTML("<b>Timestamp</b>"), W.HBox([ts_on, ts_clear, ts_fg, ts_bg]), W.HBox([ts_scale, ts_margin]), sync,
+        W.HTML("<b>Timestamp</b>"), W.HBox([ts_on, ts_clear, ts_fg, ts_bg]), W.HBox([ts_scale, ts_margin]), W.HBox([tz_box, sync]),
         W.HTML("<b>Snapshot</b>"), W.HBox([snap_btn, save_btn]), snap_info, snap_img,
         W.HTML("<b>Status</b>"), W.HBox([auto, refresh_btn]), status,
         W.HTML("<b>Messages</b>"), log,
@@ -230,7 +232,7 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
     panel.widgets = {"source": source, "fallback": fallback, "display": display_mode, "image": image_pick,
                      "mode": mode, "threshold": threshold, "ts_on": ts_on, "ts_scale": ts_scale,
                      "ts_margin": ts_margin, "ts_fg": ts_fg, "ts_bg": ts_bg, "ts_clear": ts_clear,
-                     "snap": snap_btn, "save": save_btn, "snap_img": snap_img, "sync": sync, "status": status, "log": log,
+                     "snap": snap_btn, "save": save_btn, "snap_img": snap_img, "tz": tz_box, "sync": sync, "status": status, "log": log,
                      "snap_info": snap_info}
     panel.refresh = refresh
     panel.messages = messages

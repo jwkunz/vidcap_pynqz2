@@ -40,6 +40,7 @@ class Vidcap:
         self._alloc = allocator
         self._live = self._vmem = self._snapbuf = None
         self._front = 0
+        self.tz: Optional[str] = None            # IANA zone name for the on-screen time; None = this board's own zone
 
     # ------------------------------------------------------------------ construction
     @classmethod
@@ -71,7 +72,10 @@ class Vidcap:
         self.rtc.check(); self.input.check(); self.mux.check()
 
     def start(self, source: str = "hdmi", fallback: bool = True, sync_time: bool = True,
-              timestamp: bool = True) -> None:
+              timestamp: bool = True, tz: Optional[str] = None) -> None:
+        """tz: show the time in this IANA zone (for example "America/New_York"); default is the board's zone."""
+        if tz is not None:
+            self.tz = tz
         self.check()
         a = self._alloc
         self._live = [a.alloc() for _ in range(N_LIVE_FRAMES)]
@@ -118,10 +122,29 @@ class Vidcap:
     def use_test_pattern(self, on: bool = True) -> None:
         self.input.set_source("test" if on else "hdmi")
 
-    def sync_time(self) -> datetime:
-        now = datetime.now().replace(microsecond=0)
+    def now(self) -> datetime:
+        """Wall-clock time in the zone the on-screen clock is meant to show (naive, to the second)."""
+        if self.tz:
+            from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+            try:
+                return datetime.now(ZoneInfo(self.tz)).replace(tzinfo=None, microsecond=0)
+            except ZoneInfoNotFoundError:
+                raise ValueError(f"unknown time zone {self.tz!r} (use an IANA name such as 'America/New_York')") from None
+        return datetime.now().replace(microsecond=0)
+
+    def sync_time(self, tz: Optional[str] = None) -> datetime:
+        """Set the hardware clock from this board's clock. `tz` (IANA name) changes the zone it shows, and is
+        remembered; pass "" to go back to the board's own zone. The hardware clock keeps plain wall time, so
+        call this again after a daylight-saving change."""
+        if tz is not None:
+            self.tz = tz or None
+        now = self.now()
         self.rtc.set(now)
         return now
+
+    def clock_drift(self) -> float:
+        """Seconds the hardware clock is ahead (+) of the clock it was set from (in the same zone)."""
+        return self.rtc.drift_against(self.now())
 
     def show_live(self) -> None:
         self.mux.select("live")

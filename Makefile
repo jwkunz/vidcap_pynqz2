@@ -5,7 +5,8 @@
 #   make test        all simulations and unit tests (no hardware)
 #   make overlay     build the bitstream from scratch (HLS cores -> IP -> Vivado)
 #   make dist        collect what goes on the board into workspace/dist/vidcap/
-#   make deploy BOARD=xilinx@192.168.2.82     copy dist to the board (asks for the board password)
+#   make deploy BOARD=xilinx@192.168.2.82     copy dist to the board and set its time zone (TZ_NAME=America/New_York;
+#                                             TZ_NAME= to leave it alone). Asks for the board password.
 #   make clean       delete everything generated (the workspace folder layout stays)
 #
 # Needs Vivado/Vitis 2025.2 (default ~/AMD/2025.2, override with AMD_ROOT) and internet access for the
@@ -19,6 +20,8 @@ HLS       := src/cores/vc_common/run_hls.sh
 OUT       := workspace/vivado/out
 DIST      := workspace/dist/vidcap
 BOARD     ?= xilinx@192.168.2.82
+# Time zone the board uses for the on-screen clock (default: this computer's). TZ_NAME= (empty) leaves it alone.
+TZ_NAME   ?= $(shell timedatectl show -p Timezone --value 2>/dev/null)
 
 .PHONY: all test test-rtl test-hls test-cosim test-drivers refs hls-package ip overlay dist deploy gen-tcl clean version
 
@@ -74,6 +77,8 @@ dist:
 
 deploy: dist
 	scp -r $(DIST) $(BOARD):/home/xilinx/jupyter_notebooks/
+	@if [ -n "$(TZ_NAME)" ]; then echo "setting the board's time zone to $(TZ_NAME) (asks for the board's sudo password)"; \
+	  ssh -t $(BOARD) "sudo timedatectl set-timezone $(TZ_NAME) && date"; fi
 
 # ------------------------------------------------------------------ standalone Tcl (see scripts/README.md)
 gen-tcl:
