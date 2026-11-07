@@ -20,7 +20,7 @@ OUT       := workspace/vivado/out
 DIST      := workspace/dist/vidcap
 BOARD     ?= xilinx@192.168.2.82
 
-.PHONY: all test test-rtl test-hls test-cosim test-drivers refs hls-package ip overlay dist deploy clean version
+.PHONY: all test test-rtl test-hls test-cosim test-drivers refs hls-package ip overlay dist deploy gen-tcl clean version
 
 all: test overlay dist
 
@@ -74,6 +74,11 @@ dist:
 
 deploy: dist
 	scp -r $(DIST) $(BOARD):/home/xilinx/jupyter_notebooks/
+
+# ------------------------------------------------------------------ standalone Tcl (see scripts/README.md)
+gen-tcl:
+	scripts/gen_hls_tcl.py
+	scripts/gen_vivado_tcl.sh
 
 # Removes only generated output under workspace/, never the placeholder files that keep the layout.
 clean:

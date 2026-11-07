@@ -94,6 +94,7 @@ src/                   everything that is hand-written (this is what is in git)
 docs/
   requirements.md      requirements, architecture, traceability, known limits
   register_map.md      every register of every block: the hardware contract
+scripts/               generators for standalone Tcl (HLS workspaces, Vivado project, IP catalogue)
 workspace/             everything generated (NOT in git): Vivado projects, HLS runs, bitstream, logs
   vivado/  vitishls/
 Makefile  VERSION  README.md
@@ -111,8 +112,11 @@ make test-cosim    # HLS C/RTL co-simulation                                    
 make overlay       # HLS -> IP -> Vivado: workspace/vivado/out/vidcap.bit + .hwh      (~15 min)
 make dist          # package for the board: workspace/dist/vidcap/
 make deploy BOARD=xilinx@<ip>
+make gen-tcl       # write standalone Tcl that recreates the HLS and Vivado workspaces and IP
 make clean         # delete generated files (the folder layout stays)
 ```
+
+`scripts/` holds the Tcl generators (see `scripts/README.md`); the Tcl they write goes under `workspace/`.
 
 The build **fails** if timing is not met. `make overlay` fetches PYNQ's official PYNQ-Z2 settings and the
 Digilent HDMI IP at a pinned tag (`src/overlay/scripts/fetch_refs.sh`) instead of copying them into this repo.
