@@ -1,0 +1,4 @@
+# Tool workspaces are generated and not tracked.
+# Keep only the .gitkeep files so the folder layout survives a clone.
+/workspace/*/*
+!/workspace/*/.gitkeep
