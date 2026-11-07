@@ -1,0 +1,118 @@
+src/cores/vc_common/run_xsim.sh tb_vc_rtc          src/cores/vc_common/vc_axil_bridge.v src/cores/vc_rtc/vc_rtc.v src/cores/vc_rtc/tb/tb_vc_rtc.v
+source xsim.dir/sim/xsim_script.tcl
+run -all
+ok   powerup digits 20260101000000 valid=0
+ok   2024 leap day exists
+ok   2024-02-29 -> 03-01
+ok   2025-02-28 -> 03-01
+ok   1900 not leap
+ok   2000 leap
+ok   2026-12-31 -> 2027-01-01
+ok   30-day month
+ok   hour rollover
+ok   2099 -> 2100
+ok   Feb 30 rejected
+ok   clock unchanged after bad load
+ok   digits 20261107094103
+ok   CPS trim
+TEST PASSED
+$finish called at time : 4415 ns : File "/home/kunzlej/personal/vidcap/src/cores/vc_rtc/tb/tb_vc_rtc.v" Line 140
+exit
+src/cores/vc_common/run_xsim.sh tb_vc_input_sel    src/cores/vc_common/vc_axil_bridge.v src/cores/vc_input_sel/vc_input_sel.v src/cores/vc_input_sel/tb/tb_vc_input_sel.v
+source xsim.dir/sim/xsim_script.tcl
+run -all
+ok   ID
+ok   CTRL default: HDMI source, fallback enabled
+ok   TIMEOUT default = 5 s
+ok   RETURN default = 1 s
+ok   TIMEOUT write
+ok   T1 only test-pattern frames
+ok   T1 test pattern paced to >= 100 clocks per frame
+ok   T1 pacing is not slower than configured
+ok   T1 status: active src TPG, HDMI not good
+ok   T2 only HDMI frames
+ok   T2 last frame is HDMI
+ok   T2 status: locked, good, no fallback
+ok   T2 measured 8x4
+ok   T3 not in fallback before the timeout
+ok   T3 fallback active, TPG selected
+ok   T3 output keeps running on the test pattern
+ok   T4 still in fallback before RETURN elapsed
+ok   T4 back on HDMI
+ok   T4 HDMI frames again
+ok   T5 short line: frame padded, structure intact
+ok   T5 abort flag set
+ok   T5 abort flag cleared
+ok   T5 long line: structure intact
+ok   T5 clean HDMI frames resume
+ok   T6 hung source: frame completed with padding
+ok   T7 switched to TPG cleanly
+ok   T7 switched back to HDMI cleanly
+ok   T8 lock lost -> fallback
+ok   T8 lock back -> HDMI again
+ok   T9 fallback disabled: stays on HDMI, no test pattern
+ok   no structural errors in any output frame
+ok   no frame ever mixed two sources
+ok   every pixel was at the right position
+TEST PASSED
+$finish called at time : 339235 ns : File "/home/kunzlej/personal/vidcap/src/cores/vc_input_sel/tb/tb_vc_input_sel.v" Line 232
+exit
+src/cores/vc_common/run_xsim.sh tb_vc_tpg          src/cores/vc_tpg/vc_tpg.v src/cores/vc_tpg/tb/tb_vc_tpg.v
+source xsim.dir/sim/xsim_script.tcl
+run -all
+ok   framing: tuser/tlast correct on 50 frames of 64x32
+ok   8 colour bars in the right order and colours
+ok   box moves 8/4 px per frame and bounces off both edges
+TEST PASSED
+$finish called at time : 1024055 ns : File "/home/kunzlej/personal/vidcap/src/cores/vc_tpg/tb/tb_vc_tpg.v" Line 92
+exit
+src/cores/vc_common/run_xsim.sh tb_vc_stream_mux   src/cores/vc_common/vc_axil_bridge.v src/cores/vc_stream_mux/vc_stream_mux.v src/cores/vc_stream_mux/tb/tb_vc_stream_mux.v
+source xsim.dir/sim/xsim_script.tcl
+run -all
+ok   ID
+ok   default: only live frames
+ok   status: live, nothing pending
+ok   switched to video memory
+ok   video memory frames flow
+ok   back to live
+ok   rapid toggling ends on the last request
+ok   frame counter matches monitor
+ok   no framing errors
+ok   no frame ever mixed live and video memory
+ok   every pixel at the right position
+TEST PASSED
+$finish called at time : 16405 ns : File "/home/kunzlej/personal/vidcap/src/cores/vc_stream_mux/tb/tb_vc_stream_mux.v" Line 108
+exit
+== csim vc_filter
+TEST PASSED
+== csim vc_overlay
+TEST PASSED
+== csim vc_snapshot
+TEST PASSED
+python3 -I -W error -m unittest discover -s src/drivers/tests
+.........................
+----------------------------------------------------------------------
+Ran 25 tests in 0.138s
+
+OK
+== cosim vc_filter
+INFO: [COSIM 212-1000] *** C/RTL co-simulation finished: PASS ***
+== cosim vc_overlay
+INFO: [COSIM 212-1000] *** C/RTL co-simulation finished: PASS ***
+== cosim vc_snapshot
+INFO: [COSIM 212-1000] *** C/RTL co-simulation finished: PASS ***
+src/overlay/scripts/fetch_refs.sh
+fetched PYNQ v3.1 (19ed17d) into /home/kunzlej/personal/vidcap/workspace/vivado/refs/PYNQ
+== package vc_filter
+== package vc_overlay
+== package vc_snapshot
+src/overlay/scripts/collect_ip.sh
+unpacked vc_filter
+unpacked vc_overlay
+unpacked vc_snapshot
+# run from inside workspace/ so Vivado scratch files (.Xil, NA/) never land in the source tree
+source ${AMD_ROOT:-$HOME/AMD}/2025.2/Vitis/settings64.sh >/dev/null 2>&1; \
+cd workspace/vivado && vivado -mode batch -nolog -nojournal -source /home/kunzlej/personal/vidcap/src/overlay/scripts/build.tcl -tclargs /home/kunzlej/personal/vidcap bit
+/bin/sh: 2: vivado: not found
+make: *** [Makefile:59: overlay] Error 127
+MAKE_RC=2

@@ -1,0 +1,18 @@
+part=xc7z020clg400-1
+
+[hls]
+flow_target=vivado
+clock=10ns
+clock_uncertainty=15%
+syn.top=vc_snapshot
+syn.file=@SRC@/vc_snapshot.cpp
+syn.cflags=@CTRL@ -DVC_WIDTH=@W@ -DVC_HEIGHT=@H@ -DVC_SNAP_DEPTH=@SNAP_DEPTH@ -I@COMMON@ -I@SRC@
+tb.file=@SRC@/tb/tb_vc_snapshot.cpp
+tb.cflags=-DVC_WIDTH=@W@ -DVC_HEIGHT=@H@ -I@COMMON@ -I@SRC@
+package.output.format=ip_catalog
+package.output.syn=false
+package.ip.display_name=vidcap snapshot
+package.ip.name=vc_snapshot
+package.ip.vendor=vidcap
+package.ip.library=vidcap
+package.ip.version=1.0

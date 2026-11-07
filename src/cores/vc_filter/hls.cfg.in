@@ -1,0 +1,18 @@
+part=xc7z020clg400-1
+
+[hls]
+flow_target=vivado
+clock=10ns
+clock_uncertainty=15%
+syn.top=vc_filter
+syn.file=@SRC@/vc_filter.cpp
+syn.cflags=@CTRL@ -DVC_WIDTH=@W@ -DVC_HEIGHT=@H@ -I@COMMON@
+tb.file=@SRC@/tb/tb_vc_filter.cpp
+tb.cflags=-DVC_WIDTH=@W@ -DVC_HEIGHT=@H@ -I@COMMON@
+package.output.format=ip_catalog
+package.output.syn=false
+package.ip.display_name=vidcap video filter
+package.ip.name=vc_filter
+package.ip.vendor=vidcap
+package.ip.library=vidcap
+package.ip.version=1.0

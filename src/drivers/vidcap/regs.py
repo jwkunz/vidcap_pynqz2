@@ -1,0 +1,68 @@
+"""Register maps and base addresses of the vidcap overlay (see docs/register_map.md).
+
+Everything in this module is plain data: offsets are byte offsets inside each block's
+AXI-Lite window. Nothing here depends on PYNQ, so another client (for example a Rust
+program using /dev/mem or UIO) can take its constants from the same documented map.
+"""
+from __future__ import annotations
+
+# Base addresses assigned in the block design (src/overlay/vidcap_bd.tcl), 64 KiB each.
+BASES = {
+    "vdma_live": 0x4000_0000,   # AXI VDMA: live ring (S2MM write + MM2S read)
+    "vdma_vmem": 0x4001_0000,   # AXI VDMA: video memory (MM2S read only)
+    "rtc":       0x4002_0000,   # vc_rtc            date/time clock
+    "isel":      0x4003_0000,   # vc_input_sel      HDMI / test pattern select
+    "vmux":      0x4004_0000,   # vc_stream_mux     live / video memory select
+    "filt":      0x4005_0000,   # vc_filter         (HLS)
+    "ovl":       0x4006_0000,   # vc_overlay        (HLS)
+    "snap":      0x4007_0000,   # vc_snapshot       (HLS)
+    "intc":      0x4008_0000,   # AXI interrupt controller
+}
+WINDOW = 0x1_0000
+
+# Frame geometry: 1280x720, 3 bytes per pixel, memory byte order B, G, R.
+WIDTH, HEIGHT, BPP = 1280, 720, 3
+LINE_BYTES = WIDTH * BPP
+FRAME_BYTES = LINE_BYTES * HEIGHT
+
+# Clock of every stream core, register block and VDMA (PS FCLK0).
+ACLK_HZ = 100_000_000
+
+# ---- vc_rtc (RTL) ----------------------------------------------------------------------------
+RTC_ID, RTC_CTRL, RTC_STATUS, RTC_DATE, RTC_TIME, RTC_CPS, RTC_SUBSEC = 0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18
+RTC_MAGIC = 0x5254_4301
+RTC_CTRL_LOAD, RTC_CTRL_LATCH, RTC_CTRL_CLR_ERR = 1 << 0, 1 << 1, 1 << 2
+RTC_STATUS_VALID, RTC_STATUS_ERR = 1 << 0, 1 << 1
+
+# ---- vc_input_sel (RTL) ----------------------------------------------------------------------
+ISEL_ID, ISEL_CTRL, ISEL_STATUS, ISEL_TIMEOUT, ISEL_RETURN = 0x00, 0x04, 0x08, 0x0C, 0x10
+ISEL_MEASURED, ISEL_HDMI_FRAMES, ISEL_OUT_FRAMES, ISEL_TPG_PERIOD = 0x14, 0x18, 0x1C, 0x20
+ISEL_MAGIC = 0x4953_4C01
+ISEL_CTRL_SRC_TPG, ISEL_CTRL_FALLBACK_EN = 1 << 0, 1 << 1
+ISEL_ST_LOCKED, ISEL_ST_GOOD, ISEL_ST_FALLBACK, ISEL_ST_ACTIVE_TPG, ISEL_ST_ABORT = (1 << i for i in range(5))
+
+# ---- vc_stream_mux (RTL) ---------------------------------------------------------------------
+VMUX_ID, VMUX_SEL, VMUX_STATUS, VMUX_FRAMES = 0x00, 0x04, 0x08, 0x0C
+VMUX_MAGIC = 0x4D55_5801
+
+# ---- vc_filter (HLS, offsets from the generated xvc_filter_hw.h) -----------------------------
+FILT_MODE, FILT_THRESHOLD = 0x10, 0x18
+FILTER_MODES = {"passthrough": 0, "invert": 1, "grayscale": 2, "threshold": 3,
+                "sobel": 4, "blur": 5, "sharpen": 6}
+
+# ---- vc_overlay (HLS, from xvc_overlay_hw.h) -------------------------------------------------
+OVL_ENABLE, OVL_SCALE, OVL_MARGIN, OVL_FG, OVL_BG, OVL_BG_EN = 0x10, 0x18, 0x20, 0x28, 0x30, 0x38
+
+# ---- vc_snapshot (HLS, from xvc_snapshot_hw.h) -----------------------------------------------
+SNAP_MEM_LO, SNAP_MEM_HI, SNAP_TRIGGER, SNAP_ACK, SNAP_STATUS = 0x10, 0x14, 0x1C, 0x24, 0x2C
+
+# ---- AXI VDMA (Xilinx PG020) -----------------------------------------------------------------
+VDMA_MM2S_CR, VDMA_MM2S_SR = 0x00, 0x04
+VDMA_PARK_PTR, VDMA_VERSION = 0x28, 0x2C
+VDMA_S2MM_CR, VDMA_S2MM_SR = 0x30, 0x34
+VDMA_MM2S_VSIZE, VDMA_MM2S_HSIZE, VDMA_MM2S_STRIDE, VDMA_MM2S_ADDR0 = 0x50, 0x54, 0x58, 0x5C
+VDMA_S2MM_VSIZE, VDMA_S2MM_HSIZE, VDMA_S2MM_STRIDE, VDMA_S2MM_ADDR0 = 0xA0, 0xA4, 0xA8, 0xAC
+VDMA_CR_RS, VDMA_CR_CIRCULAR, VDMA_CR_RESET, VDMA_CR_GENLOCK_EN, VDMA_CR_GENLOCK_SRC = 1, 1 << 1, 1 << 2, 1 << 3, 1 << 7
+VDMA_SR_HALTED = 1 << 0
+VDMA_SR_ERRORS = {4: "internal error", 5: "slave error", 6: "decode error",
+                  7: "SOF early", 8: "EOL early", 11: "SOF late", 15: "EOL late"}

@@ -2,3 +2,12 @@
 # Keep only the .gitkeep files so the folder layout survives a clone.
 /workspace/*/*
 !/workspace/*/.gitkeep
+
+# Python bytecode and notebook checkpoints
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Vivado scratch that appears if a tool is started from the repo root
+/.Xil/
+/NA/
