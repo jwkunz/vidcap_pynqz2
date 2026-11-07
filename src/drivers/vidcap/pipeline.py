@@ -1,6 +1,7 @@
 """High-level control of the whole vidcap pipeline."""
 from __future__ import annotations
 
+import os
 import time
 import warnings
 from datetime import datetime
@@ -10,7 +11,7 @@ import numpy as np
 
 from . import regs as R
 from .backend import Mmio
-from .blocks import (Filter, InputSelect, Rtc, Snapshot, StreamMux, TemporalAverage, TimestampOverlay, Vdma,
+from .blocks import (ColorLut, Filter, InputSelect, Rtc, Snapshot, StreamMux, TemporalAverage, TimestampOverlay, Vdma,
                      VidcapError)
 from .memory import FrameBuffer
 
@@ -22,11 +23,16 @@ FRAME_TIME_S = 1 / 60  # one output frame
 class Vidcap:
     """HDMI in -> filter -> timestamp -> HDMI out, plus snapshot and video-memory display.
 
-    Arrays exchanged with this class are (720, 1280, 3) uint8 in memory byte order B, G, R (the
-    order OpenCV uses). Pass rgb=True where offered to use R, G, B instead.
+    Arrays exchanged with this class are (height, width, 3) uint8 for the video mode (720p: 720x1280, 480p: 480x720,
+    240p: 240x1440; see `geo`) in memory byte order B, G, R (the order OpenCV uses). Pass rgb=True where offered to
+    use R, G, B instead. Each video mode is a separate bitstream: the mode of this object must match the one loaded.
     """
 
-    def __init__(self, mmio_for: Callable[[int], Mmio], allocator, bases: Optional[Dict[str, int]] = None):
+    def __init__(self, mmio_for: Callable[[int], Mmio], allocator, bases: Optional[Dict[str, int]] = None,
+                 mode: str = R.DEFAULT_MODE):
+        if mode not in R.MODES:
+            raise ValueError(f"unknown video mode {mode!r}; choose one of {', '.join(R.MODES)}")
+        self.geo = R.MODES[mode]
         self.bases = dict(bases or R.BASES)
         mm = {name: mmio_for(base) for name, base in self.bases.items()}
         self.rtc = Rtc(mm["rtc"])
@@ -36,6 +42,9 @@ class Vidcap:
         self.overlay = TimestampOverlay(mm["ovl"])
         self.snap = Snapshot(mm["snap"])
         self.tavg = TemporalAverage(mm["tavg"])
+        self.lut = ColorLut(mm["lut"])
+        self.has_lut = True                  # False for a bitstream built before the colour grading existed
+        self.look: Optional[str] = None      # name of the look that is loaded (None = none)
         self.vdma_live = Vdma(mm["vdma_live"])
         self.vdma_vmem = Vdma(mm["vdma_vmem"])
         self._alloc = allocator
@@ -46,9 +55,13 @@ class Vidcap:
 
     # ------------------------------------------------------------------ construction
     @classmethod
-    def on_pynq(cls, bitfile: str = "vidcap.bit", download: bool = True, allocator=None,
-                protect: bool = True) -> "Vidcap":
-        """Load the bitstream through PYNQ and return a ready (not yet started) pipeline.
+    def on_pynq(cls, bitfile: Optional[str] = None, download: bool = True, allocator=None,
+                protect: bool = True, mode: str = R.DEFAULT_MODE) -> "Vidcap":
+        """Load the bitstream for a video mode through PYNQ and return a ready (not yet started) pipeline.
+
+        mode is "720p", "480p" or "240p"; the bitstream vidcap_<mode>.bit is looked for next to the vidcap package
+        and in the current folder, unless `bitfile` names one. Switching modes means loading another bitstream
+        (about 14 s), so call this again with the other mode.
 
         Only ONE process (one notebook kernel) should drive the hardware. If another process has the design
         loaded, its DMA engines are stopped first (protect=True) so that replacing the bitstream cannot wedge
@@ -56,6 +69,9 @@ class Vidcap:
         """
         from .backend import PynqMmio
         from .memory import PynqAllocator
+        if mode not in R.MODES:
+            raise ValueError(f"unknown video mode {mode!r}; choose one of {', '.join(R.MODES)}")
+        bitfile = bitfile or cls.find_bitfile(R.MODES[mode])
         if download:
             if protect:
                 from . import safety
@@ -66,30 +82,48 @@ class Vidcap:
                                   "hardware.", RuntimeWarning, stacklevel=2)
             from pynq import Overlay
             cls._overlay = Overlay(bitfile)          # keeps the overlay (and its .hwh) alive
-        return cls(lambda base: PynqMmio(base, R.WINDOW), allocator or PynqAllocator())
+        v = cls(lambda base: PynqMmio(base, R.WINDOW), allocator or PynqAllocator(), mode=mode)
+        from . import safety
+        v.has_lut = safety.loaded_design_has("lut")      # an older bitstream has no colour grading: never touch its registers
+        return v
+
+    @staticmethod
+    def find_bitfile(geo: R.Geometry) -> str:
+        """Path of vidcap_<mode>.bit: next to the vidcap package (the layout `make deploy` creates), or in the
+        current folder."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        for folder in (os.path.dirname(here), os.getcwd()):
+            path = os.path.join(folder, geo.bitfile)
+            if os.path.exists(path):
+                return path
+        raise VidcapError(f"{geo.bitfile} not found next to the vidcap package or in the current folder: "
+                          f"is the {geo.name} bitstream built and deployed?")
 
     # ------------------------------------------------------------------ start / stop
     def check(self) -> None:
         """Verify every block answers with its ID. Fails early if the wrong bitstream is loaded."""
         self.rtc.check(); self.input.check(); self.mux.check()
+        if self.has_lut:
+            self.lut.check()
 
     def start(self, source: str = "hdmi", fallback: bool = True, sync_time: bool = True,
               timestamp: bool = True, tz: Optional[str] = None, history_frames: int = 16) -> None:
         """tz: show the time in this IANA zone (for example "America/New_York"); default is the board's zone.
         history_frames: how many frames of brightness history to reserve for the temporal average, which can then
-        average over up to that many frames. Costs 0.92 MB per frame plus 1.8 MB, taken from the board's
-        contiguous-memory pool (128 MB, shared with the video buffers)."""
+        average over up to that many frames. Costs one byte per pixel per frame plus two for the sum frame
+        (720p: 0.92 MB per frame plus 1.8 MB), taken from the board's contiguous-memory pool (128 MB, shared with
+        the video buffers)."""
         if tz is not None:
             self.tz = tz
         self.check()
         a = self._alloc
-        self._live = [a.alloc() for _ in range(N_LIVE_FRAMES)]
-        self._vmem = [a.alloc() for _ in range(N_VMEM_FRAMES)]
-        self._snapbuf = a.alloc()
+        self._live = [a.alloc(self.geo) for _ in range(N_LIVE_FRAMES)]
+        self._vmem = [a.alloc(self.geo) for _ in range(N_VMEM_FRAMES)]
+        self._snapbuf = a.alloc(self.geo)
         for fb in self._live + self._vmem + [self._snapbuf]:
             fb.array[:] = 0
         self.history_frames = int(history_frames)
-        self._tavgbuf = a.alloc_bytes(TemporalAverage.bytes_needed(self.history_frames))
+        self._tavgbuf = a.alloc_bytes(TemporalAverage.bytes_needed(self.history_frames, self.geo))
         self._tavgbuf.array[:] = 0
 
         # control blocks first, so video is in a known state before it starts flowing
@@ -107,9 +141,11 @@ class Vidcap:
             self.sync_time()
 
         # DMA engines: writer first, then the reader that follows it
-        self.vdma_live.start_s2mm([f.phys for f in self._live])
-        self.vdma_live.start_mm2s([f.phys for f in self._live], genlock_slave=True)
-        self.vdma_vmem.start_mm2s([f.phys for f in self._vmem], park=0)
+        g = self.geo
+        size = dict(hsize=g.line_bytes, vsize=g.height, stride=g.line_bytes)
+        self.vdma_live.start_s2mm([f.phys for f in self._live], **size)
+        self.vdma_live.start_mm2s([f.phys for f in self._live], genlock_slave=True, **size)
+        self.vdma_vmem.start_mm2s([f.phys for f in self._vmem], park=0, **size)
 
         # The video stream is already flowing when the write channel starts, so it begins in the middle
         # of a frame and flags a one-time "internal error / SOF late". Measured on the board: the flags
@@ -148,6 +184,48 @@ class Vidcap:
         self.tavg.set_n(int(n))
         self.tavg.enable(True)
 
+    # ---- colour grading
+    @staticmethod
+    def looks() -> Dict[str, str]:
+        """The built-in looks: name -> description. Any .cube file works too (set_look)."""
+        from . import lut
+        return {n: lut.look_description(n) for n in ["identity"] + lut.look_names()}
+
+    def set_look(self, look, strength: float = 100) -> None:
+        """Grade the picture with a colour look-up table.
+
+        look: a built-in name (see looks()), a path to a .cube file, the bytes of one, or a (17,17,17,3) uint8 cube
+        (vidcap.lut). None or "off" switches grading off. strength is a percentage: 100 = the full look, 0 = none.
+        The table is loaded while grading is off, so the picture never shows a half-written table.
+        """
+        from . import lut
+        if not self.has_lut:
+            raise VidcapError("this bitstream has no colour grading: load a v1.2.0 or later bitstream")
+        if look is None or (isinstance(look, str) and look == "off"):
+            self.lut.enable(False)
+            self.look = None
+            return
+        cube = lut.resolve(look)
+        if self.lut.enabled():
+            self.lut.enable(False)
+            time.sleep(3 * FRAME_TIME_S)             # it takes effect on a frame boundary
+        self.lut.load(cube)
+        self.lut.set_strength(self._strength_code(strength))
+        self.lut.enable(True)
+        self.look = look if isinstance(look, str) and look in self.looks() else "custom"
+
+    def set_look_strength(self, strength: float) -> None:
+        """How much of the look to apply, in percent (0..100), without reloading the table."""
+        if not self.has_lut:
+            raise VidcapError("this bitstream has no colour grading")
+        self.lut.set_strength(self._strength_code(strength))
+
+    @staticmethod
+    def _strength_code(percent: float) -> int:
+        if not 0 <= percent <= 100:
+            raise ValueError("strength is a percentage, 0..100")
+        return int(round(percent * R.LUT_STRENGTH_MAX / 100))
+
     def use_test_pattern(self, on: bool = True) -> None:
         self.input.set_source("test" if on else "hdmi")
 
@@ -179,9 +257,10 @@ class Vidcap:
         self.mux.select("live")
 
     def show_image(self, image: np.ndarray, rgb: bool = False) -> None:
-        """Display a 1280x720 image instead of live video (double-buffered, no tearing)."""
-        if image.shape != (R.HEIGHT, R.WIDTH, 3) or image.dtype != np.uint8:
-            raise ValueError(f"image must be uint8 with shape {(R.HEIGHT, R.WIDTH, 3)}, got {image.dtype} {image.shape}")
+        """Display an image of this mode's size instead of live video (double-buffered, no tearing)."""
+        if image.shape != self.geo.shape or image.dtype != np.uint8:
+            raise ValueError(f"image must be uint8 with shape {self.geo.shape} for {self.geo.name}, "
+                             f"got {image.dtype} {image.shape}")
         if self._vmem is None:
             raise VidcapError("call start() first")
         hidden = 1 - self._front
@@ -209,11 +288,15 @@ class Vidcap:
 
     def status(self) -> Dict[str, object]:
         return {
+            "mode": self.geo.name,
             "input": self.input.status(),
             "source_selected": self.input.source(),
             "display": self.mux.active(),
             "filter": self.filter.mode(),
             "temporal_average": {"enabled": self.tavg.enabled(), "n": self.tavg.n(), **self.tavg.status()},
+            **({"color_grade": {"look": self.look, "enabled": self.lut.enabled(),
+                                "strength_percent": round(self.lut.strength() * 100 / R.LUT_STRENGTH_MAX)}}
+               if self.has_lut else {}),
             "timestamp": self.overlay.enabled(),
             "clock": self._clock_text(),
             "clock_was_set": self.rtc.was_set,

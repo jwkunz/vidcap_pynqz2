@@ -1,6 +1,7 @@
 # vidcap_bd.tcl - Block design for the vidcap overlay (PYNQ-Z2, xc7z020).
 #
-# Expects (set by build.tcl):  root  = repository root,  refs = workspace/vivado/refs/PYNQ
+# Expects (set by build.tcl):  root  = repository root,  refs = workspace/vivado/refs/PYNQ,
+#                              mode  = 720p | 480p | 240p,  cfg = the dict read from src/overlay/modes/<mode>.env
 #
 # Clocking (see docs/requirements.md):
 #   aclk   100 MHz  PS FCLK0 - every stream core, VDMA, interconnect and all AXI-Lite registers
@@ -48,7 +49,7 @@ set c1 [cip xilinx.com:ip:xlconstant:1.1 c1 CONFIG.CONST_VAL {1} CONFIG.CONST_WI
 # ---------------------------------------------------------------- Pixel clock (74.25 MHz exactly)
 set clkw [cip xilinx.com:ip:clk_wiz:6.0 clkw \
     CONFIG.PRIM_IN_FREQ {100.000} \
-    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ {74.250} \
+    CONFIG.CLKOUT1_REQUESTED_OUT_FREQ [dict get $cfg PIXEL_MHZ] \
     CONFIG.USE_RESET {false} \
     CONFIG.USE_LOCKED {true}]
 net ps7/FCLK_CLK0 clkw/clk_in1
@@ -66,8 +67,8 @@ net c1/dout hdmi_in_hpd
 net c1/dout hdmi_out_hpd
 
 set dvi [cip digilentinc.com:ip:dvi2rgb:1.7 dvi \
-    CONFIG.kEdidFileName {720p_edid.data} \
-    CONFIG.kClkRange {2} \
+    CONFIG.kEdidFileName [dict get $cfg EDID] \
+    CONFIG.kClkRange [dict get $cfg RX_CLK_RANGE] \
     CONFIG.kRstActiveHigh {false} \
     CONFIG.kAddBUFG {false}]
 connect_bd_intf_net $hdmi_in [get_bd_intf_pins dvi/TMDS]
@@ -92,6 +93,8 @@ net ps7/FCLK_CLK0 vin/aclk
 net rst/peripheral_aresetn vin/aresetn
 
 # ---------------------------------------------------------------- Stream cores
+set vw [dict get $cfg WIDTH]
+set vh [dict get $cfg HEIGHT]
 set tpg  [cmod vc_tpg tpg]
 set isel [cmod vc_input_sel isel]
 set snap [cip vidcap:vidcap:vc_snapshot:1.0 snap]
@@ -99,8 +102,13 @@ set vmx  [cmod vc_stream_mux vmx]
 set tavg [cip vidcap:vidcap:vc_tavg:1.0 tavg]
 set filt [cip vidcap:vidcap:vc_filter:1.0 filt]
 set ovl  [cip vidcap:vidcap:vc_overlay:1.0 ovl]
+set lut  [cmod vc_lut3d lut]
 set swp  [cmod vc_axis_swap_gb swp]
 set rtc  [cmod vc_rtc rtc]
+# the frame size is a parameter of the RTL cores (the HLS cores were built for it)
+set_property -dict [list CONFIG.W $vw CONFIG.H $vh] [get_bd_cells tpg]
+set_property -dict [list CONFIG.W $vw CONFIG.H $vh] [get_bd_cells isel]
+set_property -dict [list CONFIG.H $vh] [get_bd_cells vmx]
 
 # input select: HDMI + test pattern -> snapshot -> VDMA write
 intf vin/video_out isel/s_axis_hdmi
@@ -135,7 +143,9 @@ intf vdma1/M_AXIS_MM2S vmx/s_axis_vmem
 # temporal average (off by default: pure pass-through) sits between the source mux and the filter
 intf vmx/m_axis tavg/in_r
 intf tavg/out_r filt/in_r
-intf filt/out_r ovl/in_r
+# colour grading (3D look-up table, off by default) sits after the filter and before the timestamp
+intf filt/out_r lut/s_axis
+intf lut/m_axis ovl/in_r
 intf ovl/out_r swp/s_axis
 net rtc/time_digits ovl/time_digits
 
@@ -144,14 +154,32 @@ set vtc [cip xilinx.com:ip:v_tc:6.2 vtc \
     CONFIG.HAS_AXI4_LITE {false} \
     CONFIG.enable_detection {false} \
     CONFIG.enable_generation {true} \
-    CONFIG.VIDEO_MODE {720p}]
+    CONFIG.VIDEO_MODE [dict get $cfg VTC_MODE]]
+if {[dict get $cfg VTC_MODE] eq "Custom"} {
+    # Vivado has no 240p preset, and its "480p" is VGA (640x480), so the standard CEA timing is set by hand.
+    # Vertical blanking and sync edges are placed at the start of the line / of the horizontal sync, as usual.
+    set hs [dict get $cfg H_SYNC_START]
+    set vtc_custom [list \
+        CONFIG.GEN_HACTIVE_SIZE $vw CONFIG.GEN_HFRAME_SIZE [dict get $cfg H_FRAME] \
+        CONFIG.GEN_HSYNC_START $hs CONFIG.GEN_HSYNC_END [dict get $cfg H_SYNC_END] \
+        CONFIG.GEN_VACTIVE_SIZE $vh \
+        CONFIG.GEN_F0_VFRAME_SIZE [dict get $cfg V_FRAME] CONFIG.GEN_F1_VFRAME_SIZE [dict get $cfg V_FRAME] \
+        CONFIG.GEN_F0_VSYNC_VSTART [dict get $cfg V_SYNC_START] CONFIG.GEN_F0_VSYNC_VEND [dict get $cfg V_SYNC_END] \
+        CONFIG.GEN_F1_VSYNC_VSTART [dict get $cfg V_SYNC_START] CONFIG.GEN_F1_VSYNC_VEND [dict get $cfg V_SYNC_END] \
+        CONFIG.GEN_F0_VBLANK_HSTART $vw CONFIG.GEN_F0_VBLANK_HEND $vw \
+        CONFIG.GEN_F1_VBLANK_HSTART $vw CONFIG.GEN_F1_VBLANK_HEND $vw \
+        CONFIG.GEN_F0_VSYNC_HSTART $hs CONFIG.GEN_F0_VSYNC_HEND $hs \
+        CONFIG.GEN_F1_VSYNC_HSTART $hs CONFIG.GEN_F1_VSYNC_HEND $hs \
+        CONFIG.GEN_HSYNC_POLARITY [dict get $cfg SYNC_POLARITY] CONFIG.GEN_VSYNC_POLARITY [dict get $cfg SYNC_POLARITY]]
+    set_property -dict $vtc_custom [get_bd_cells vtc]
+}
 set vout [cip xilinx.com:ip:v_axi4s_vid_out:4.0 vout \
     CONFIG.C_ADDR_WIDTH {11} \
     CONFIG.C_HAS_ASYNC_CLK {1} \
     CONFIG.C_HYSTERESIS_LEVEL {1024} \
     CONFIG.C_VTG_MASTER_SLAVE {1}]
 set rgb [cip digilentinc.com:ip:rgb2dvi:1.2 rgb \
-    CONFIG.kClkRange {2} \
+    CONFIG.kClkRange [dict get $cfg TX_CLK_RANGE] \
     CONFIG.kGenerateSerialClk {true} \
     CONFIG.kRstActiveHigh {false}]
 set hdmi_out [create_bd_intf_port -mode Master -vlnv digilentinc.com:interface:tmds_rtl:1.0 hdmi_out]
@@ -198,13 +226,13 @@ net irqcat/dout intc/intr
 net intc/irq ps7/IRQ_F2P
 
 # ---------------------------------------------------------------- AXI infrastructure
-# control: PS GP0 -> 10 AXI-Lite slaves
-set ic_gp [cip xilinx.com:ip:axi_interconnect:2.1 ic_gp CONFIG.NUM_SI {1} CONFIG.NUM_MI {10}]
+# control: PS GP0 -> 11 AXI-Lite slaves
+set ic_gp [cip xilinx.com:ip:axi_interconnect:2.1 ic_gp CONFIG.NUM_SI {1} CONFIG.NUM_MI {11}]
 intf ps7/M_AXI_GP0 ic_gp/S00_AXI
 set slaves {vdma0/S_AXI_LITE vdma1/S_AXI_LITE rtc/s_axi isel/s_axi vmx/s_axi
-            filt/s_axi_control ovl/s_axi_control snap/s_axi_control intc/s_axi tavg/s_axi_control}
+            filt/s_axi_control ovl/s_axi_control snap/s_axi_control intc/s_axi tavg/s_axi_control lut/s_axi}
 set i 0
-foreach s $slaves { intf ic_gp/M0${i}_AXI $s; incr i }
+foreach s $slaves { intf ic_gp/M[format %02d $i]_AXI $s; incr i }
 
 # data: VDMA0 (2 masters) -> HP0 ; VDMA1 + snapshot -> HP1
 set ic_hp0 [cip xilinx.com:ip:axi_interconnect:2.1 ic_hp0 CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}]
@@ -231,11 +259,11 @@ set aclk_pins {
     vdma0/s_axi_lite_aclk vdma0/m_axi_mm2s_aclk vdma0/m_axi_s2mm_aclk vdma0/m_axis_mm2s_aclk vdma0/s_axis_s2mm_aclk
     vdma1/s_axi_lite_aclk vdma1/m_axi_mm2s_aclk vdma1/m_axis_mm2s_aclk
     snap/ap_clk filt/ap_clk ovl/ap_clk tavg/ap_clk
-    tpg/aclk isel/aclk vmx/aclk swp/aclk rtc/aclk intc/s_axi_aclk
+    tpg/aclk isel/aclk vmx/aclk swp/aclk lut/aclk rtc/aclk intc/s_axi_aclk
 }
 foreach p $aclk_pins { net ps7/FCLK_CLK0 $p }
 set i 0
-foreach s $slaves { net ps7/FCLK_CLK0 ic_gp/M0${i}_ACLK; net rst/peripheral_aresetn ic_gp/M0${i}_ARESETN; incr i }
+foreach s $slaves { net ps7/FCLK_CLK0 ic_gp/M[format %02d $i]_ACLK; net rst/peripheral_aresetn ic_gp/M[format %02d $i]_ARESETN; incr i }
 
 set rst_pins {
     ic_gp/S00_ARESETN
@@ -244,7 +272,7 @@ set rst_pins {
     ic_hp2/S00_ARESETN ic_hp2/S01_ARESETN ic_hp2/M00_ARESETN
     vdma0/axi_resetn vdma1/axi_resetn
     snap/ap_rst_n filt/ap_rst_n ovl/ap_rst_n tavg/ap_rst_n
-    tpg/aresetn isel/aresetn vmx/aresetn rtc/aresetn intc/s_axi_aresetn
+    tpg/aresetn isel/aresetn vmx/aresetn lut/aresetn rtc/aresetn intc/s_axi_aresetn
 }
 foreach p $rst_pins { net rst/peripheral_aresetn $p }
 net rst/interconnect_aresetn ic_gp/ARESETN ic_hp0/ARESETN ic_hp1/ARESETN ic_hp2/ARESETN
@@ -252,7 +280,7 @@ net rst/interconnect_aresetn ic_gp/ARESETN ic_hp0/ARESETN ic_hp1/ARESETN ic_hp2/
 # ---------------------------------------------------------------- address map (see docs/register_map.md)
 assign_bd_address
 set map {vdma0 0x40000000 vdma1 0x40010000 rtc 0x40020000 isel 0x40030000 vmx 0x40040000
-         filt 0x40050000 ovl 0x40060000 snap 0x40070000 intc 0x40080000 tavg 0x40090000}
+         filt 0x40050000 ovl 0x40060000 snap 0x40070000 intc 0x40080000 tavg 0x40090000 lut 0x400A0000}
 # pass 1 parks every register block at a temporary address so pass 2 can never collide with the
 # addresses the automatic assignment picked; pass 2 sets the final, documented addresses.
 set k 0

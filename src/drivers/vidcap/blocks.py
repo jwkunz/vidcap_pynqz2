@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from typing import Dict, Optional, Sequence, Tuple, Union
 
+from . import lut as L
 from . import regs as R
 from .backend import Mmio
 
@@ -203,6 +204,59 @@ class Filter:
 
 
 # =========================================================================================
+class ColorLut:
+    """Colour grading (vc_lut3d): a 17x17x17 look-up table with interpolation, applied to every pixel after the filter.
+
+    ENABLE and STRENGTH take effect at the next frame. `strength` is 0..256 here (256 = the full look); Vidcap.set_look()
+    takes a percentage instead. The table is write-only in hardware: load() checks it with a write count and a checksum.
+    """
+
+    def __init__(self, mmio: Mmio):
+        self.m = mmio
+
+    def check(self) -> None:
+        _check_id("vc_lut3d", self.m, R.LUT_ID, R.LUT_MAGIC)
+
+    def enable(self, on: bool = True) -> None:
+        self.m.write(R.LUT_CTRL, R.LUT_CTRL_ENABLE if on else 0)
+
+    def enabled(self) -> bool:
+        return bool(self.m.read(R.LUT_CTRL) & R.LUT_CTRL_ENABLE)
+
+    def set_strength(self, strength: int) -> None:
+        if not 0 <= strength <= R.LUT_STRENGTH_MAX:
+            raise ValueError(f"strength must be 0..{R.LUT_STRENGTH_MAX}")
+        self.m.write(R.LUT_STRENGTH, int(strength))
+
+    def strength(self) -> int:
+        return self.m.read(R.LUT_STRENGTH) & 0x1FF
+
+    def frames(self) -> int:
+        return self.m.read(R.LUT_FRAMES)
+
+    def load(self, cube, verify: bool = True) -> None:
+        """Write a 17x17x17x3 cube (see vidcap.lut) into the table. The picture changes while it is written, so
+        Vidcap.set_look() switches the table off first."""
+        cube = L._check_cube(cube)
+        words = L.to_bank_words(cube)
+        self.m.write(R.LUT_CTRL, R.LUT_CTRL_CLEAR | (R.LUT_CTRL_ENABLE if self.enabled() else 0))
+        for i in L.used_slots():
+            self.m.write(R.LUT_CUBE + 4 * int(i), int(words[i]))
+        if verify:
+            n, got, want = self.m.read(R.LUT_WRITES), self.m.read(R.LUT_CHECKSUM), L.checksum(cube)
+            if n != L.NODES or got != want:
+                raise VidcapError(f"colour table load failed: hardware counted {n} writes (expected {L.NODES}), "
+                                  f"checksum 0x{got:08X} (expected 0x{want:08X})")
+
+    def probe(self) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
+        """The first pixel of the latest frame as (R,G,B), before and after the table. Meaningful for a still picture
+        (video memory), when strength is 256 or you account for it with vidcap.lut.apply_lut()."""
+        def rgb(v):
+            return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+        return rgb(self.m.read(R.LUT_PROBE_IN)), rgb(self.m.read(R.LUT_PROBE_OUT))
+
+
+# =========================================================================================
 class TemporalAverage:
     """Moving average of brightness over the last N frames, with a running sum (vc_tavg).
 
@@ -215,9 +269,10 @@ class TemporalAverage:
         self.m = mmio
 
     @staticmethod
-    def bytes_needed(slots: int) -> int:
-        """Size of the buffer for a history of `slots` frames."""
-        return slots * R.TAVG_LUMA_FRAME_BYTES + R.TAVG_SUM_FRAME_BYTES
+    def bytes_needed(slots: int, geo: Optional[R.Geometry] = None) -> int:
+        """Size of the buffer for a history of `slots` frames of the given video mode (default 720p)."""
+        g = geo or R.MODES[R.DEFAULT_MODE]
+        return slots * g.luma_frame_bytes + g.sum_frame_bytes
 
     def set_buffer(self, phys: int, slots: int) -> None:
         """Point the hardware at its buffer (read and write ports get the same address) and set the ring size."""

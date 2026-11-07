@@ -10,6 +10,7 @@ So before a bitstream is replaced, the DMA engines of the design that is current
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import Callable, List, Optional
 
@@ -18,9 +19,14 @@ from .backend import DevMemMmio, Mmio
 from .blocks import VidcapError
 
 
-def design_loaded_since_boot(bitfile: str, state_file: Optional[str] = None, boot_time: Optional[float] = None,
-                             loaded_name: Optional[str] = None) -> bool:
-    """True if PYNQ says `bitfile` is the loaded bitstream AND that was recorded after this boot.
+def _is_vidcap_bitfile(path) -> bool:
+    return re.fullmatch(r"vidcap(_\w+)?\.bit", os.path.basename(str(path))) is not None
+
+
+def design_loaded_since_boot(bitfile: Optional[str] = None, state_file: Optional[str] = None,
+                             boot_time: Optional[float] = None, loaded_name: Optional[str] = None) -> bool:
+    """True if PYNQ says a vidcap design (any video mode, or `bitfile`) is the loaded bitstream AND that was
+    recorded after this boot. All modes share one register map, so a design of another mode is stopped the same way.
 
     PYNQ keeps the loaded-bitstream name in a file that survives a reboot, but the FPGA does not, so the
     file alone is not proof: touching the registers of an unconfigured FPGA can hang the CPU.
@@ -28,7 +34,10 @@ def design_loaded_since_boot(bitfile: str, state_file: Optional[str] = None, boo
     if loaded_name is None:
         from pynq import PL
         loaded_name = PL.bitfile_name
-    if not loaded_name or os.path.basename(str(loaded_name)) != os.path.basename(bitfile):
+    if not loaded_name:
+        return False
+    same_file = bitfile is not None and os.path.basename(str(loaded_name)) == os.path.basename(bitfile)
+    if not (same_file or _is_vidcap_bitfile(loaded_name)):
         return False
     if state_file is None:
         import pynq.pl_server as server

@@ -3,6 +3,7 @@
 # run_hls.sh - Run a Vitis HLS step for one core.
 #
 # Usage: run_hls.sh <core> <step>
+#   env  MODE = 720p (default) | 480p | 240p : the video mode a syn/package build is sized for
 #   step = csim     C simulation against the testbench           (small frame)
 #          cosim    C synthesis + RTL co-simulation               (small frame)
 #          syn      C synthesis at full 1280x720                   (reports)
@@ -26,7 +27,12 @@ SIM_W=64; SIM_H=48
 SIM_W="${SIM_W_OVERRIDE:-$SIM_W}"; SIM_H="${SIM_H_OVERRIDE:-$SIM_H}"
 case "$STEP" in
   csim|cosim) W=$SIM_W; H=$SIM_H; CTRL=""; WS="$ROOT/workspace/vitishls/${CORE}_sim" ;;
-  syn|package) W=1280; H=720; CTRL="-DVC_CTRL_NONE"; WS="$ROOT/workspace/vitishls/${CORE}_build" ;;
+  syn|package)
+    MODE="${MODE:-720p}"
+    MODE_FILE="$ROOT/src/overlay/modes/$MODE.env"
+    [ -f "$MODE_FILE" ] || { echo "unknown MODE '$MODE' (no $MODE_FILE)" >&2; exit 2; }
+    W=$(sed -n 's/^WIDTH=//p' "$MODE_FILE"); H=$(sed -n 's/^HEIGHT=//p' "$MODE_FILE")
+    CTRL="-DVC_CTRL_NONE"; WS="$ROOT/workspace/vitishls/${CORE}_build_${MODE}" ;;
   *) echo "unknown step '$STEP'" >&2; exit 2 ;;
 esac
 # m_axi port depth for the temporal average: the testbench buffer (8 ring slots + sum frame) for simulation,

@@ -19,6 +19,7 @@ All registers are 32 bits wide, accessed at 4-byte aligned offsets. Every block 
 | `snap` | `0x4007_0000` | `vc_snapshot` frame capture (HLS) |
 | `intc` | `0x4008_0000` | AXI interrupt controller |
 | `tavg` | `0x4009_0000` | `vc_tavg` temporal average over the last N frames (HLS) |
+| `lut` | `0x400A_0000` | `vc_lut3d` colour grading look-up table (RTL) |
 
 The authoritative source for these addresses is `src/overlay/vidcap_bd.tcl` (the `map` list at the
 end); the register offsets below for HLS blocks are checked against the HLS-generated headers by
@@ -167,6 +168,38 @@ Size = SLOTS x 921,600 + 1,843,200 bytes. Frame *t* is written to ring slot (*t*
 is read from slot (*t* - N) mod SLOTS. The buffer does not need to be cleared. Memory traffic while on: read the oldest frame
 (1 byte/pixel), read the sum (2), write the sum (2), write the new frame (1), about 330 MB/s at 720p60, whatever N is.
 Switch it off and wait two frames before freeing the buffer.
+
+## `lut` — `vc_lut3d` (RTL)
+
+Colour grading between the filter and the timestamp: a 17x17x17 colour cube with trilinear interpolation, one pixel per
+clock. Input and output are the same 24-bit `{R,G,B}` stream. The table holds an identity (no change) after
+configuration, and the block is bypassed (`ENABLE` = 0) until switched on.
+
+| Offset | Name | Access | Meaning |
+|---|---|---|---|
+| `0x0000` | `ID` | R | `0x4C55_5403` |
+| `0x0004` | `CTRL` | RW | bit 0 `ENABLE` (0 = bypass); bit 1 `CLEAR`: write 1 to zero `WRITES` and `CHECKSUM` (reads 0) |
+| `0x0008` | `STRENGTH` | RW | 0..256, default 256: `out = in + (graded - in) * STRENGTH / 256`. Values above 256 saturate |
+| `0x000C` | `FRAMES` | R | frames accepted |
+| `0x0010` | `WRITES` | R | cube words written since `CLEAR` |
+| `0x0014` | `CHECKSUM` | R | sum (mod 2^32) of the 24-bit data of those words: compare with `vidcap.lut.checksum(cube)` |
+| `0x0018` | `PROBE_IN` | R | `{8'b0,R,G,B}` of the first pixel of the latest frame, before the table |
+| `0x001C` | `PROBE_OUT` | R | the same pixel after the table and blend |
+| `0x8000..0xFFFF` | `CUBE` | W | the table, 8 banks of 1024 words (`0x8000 + bank*0x1000 + offset*4`). Write-only, full 32-bit words; reads return 0 |
+
+`ENABLE` and `STRENGTH` are sampled on the first pixel of each frame, so a change never tears a picture. Writing the cube
+while enabled changes the picture mid-frame: switch off, wait two frames, write, switch on (`Vidcap.set_look()` does).
+
+**Cube layout.** A node `(r,g,b)` (each 0..16, node `k` = input level `k*255/16`) is stored in bank
+`{r[0],g[0],b[0]}` at `offset = (r>>1) + 9*(g>>1) + 81*(b>>1)` (0..728); the word is `0x00RRGGBB`, the output colour for
+that node. The 8 corners around any colour differ in the parity of every coordinate, so each comes from a different
+bank, all in one clock. `vidcap.lut.to_bank_words()` builds the 8192-word image.
+
+**Arithmetic** (mirrored bit for bit by `vidcap.lut.apply_lut()` and checked against the RTL in `tb_vc_lut3d`): for each
+channel value `v`, node `i = v>>4` and fraction `f = {v[3:0], v[7:4]}` (8 bits, so 255 lands on the last node). With `c` the
+8 corner colours, `lerp8(a,b,f) = a*256 + (b-a)*f` along red, then `lerp16(a,b,f) = (a*256 + (b-a)*f) >> 8` along green
+and blue, `graded = (x + 128) >> 8`, `out = clamp(in + (((graded - in) * STRENGTH + 128) >>> 8))`. Latency is 14 clocks;
+the block stalls with its output (AXI back-pressure).
 
 ## `vdma_live`, `vdma_vmem` — AXI VDMA
 

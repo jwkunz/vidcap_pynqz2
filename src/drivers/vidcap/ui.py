@@ -2,7 +2,7 @@
 non-interactive notebook uses; the panel adds nothing to the hardware contract.
 
     from vidcap import Vidcap, ui
-    v = Vidcap.on_pynq('vidcap.bit'); v.start()
+    v = Vidcap.on_pynq(mode='720p'); v.start()
     panel = ui.build_panel(v); display(panel)
 """
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 import numpy as np
 
+from . import lut as L
 from . import regs as R
 from .blocks import VidcapError
 
@@ -23,25 +24,34 @@ SNAPSHOT_DIR = "/home/xilinx/jupyter_notebooks/vidcap/snapshots"
 
 
 # ------------------------------------------------------------------ test images for video memory
-def image_gradient() -> np.ndarray:
-    img = np.zeros((R.HEIGHT, R.WIDTH, 3), np.uint8)                       # B, G, R order
-    img[..., 0] = np.linspace(0, 255, R.WIDTH, dtype=np.uint8)
-    img[..., 2] = np.linspace(0, 255, R.HEIGHT, dtype=np.uint8)[:, None]
+def _shape(geo):
+    g = geo or R.MODES[R.DEFAULT_MODE]
+    return g.height, g.width
+
+
+def image_gradient(geo=None) -> np.ndarray:
+    h, w = _shape(geo)
+    img = np.zeros((h, w, 3), np.uint8)                       # B, G, R order
+    img[..., 0] = np.linspace(0, 255, w, dtype=np.uint8)
+    img[..., 2] = np.linspace(0, 255, h, dtype=np.uint8)[:, None]
     return img
 
 
-def image_bars() -> np.ndarray:
+def image_bars(geo=None) -> np.ndarray:
+    h, w = _shape(geo)
     cols_rgb = [(255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
                 (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)]
-    img = np.zeros((R.HEIGHT, R.WIDTH, 3), np.uint8)
-    w = R.WIDTH // 8
+    img = np.zeros((h, w, 3), np.uint8)
+    bw = w // 8
     for i, (r, g, b) in enumerate(cols_rgb):
-        img[:, i * w:(i + 1) * w] = (b, g, r)
+        img[:, i * bw:(i + 1) * bw] = (b, g, r)
     return img
 
 
-def image_checker(size: int = 80) -> np.ndarray:
-    yy, xx = np.indices((R.HEIGHT, R.WIDTH))
+def image_checker(geo=None, size: int = 0) -> np.ndarray:
+    h, w = _shape(geo)
+    size = size or max(8, h // 9)
+    yy, xx = np.indices((h, w))
     on = ((xx // size + yy // size) % 2).astype(np.uint8) * 255
     return np.dstack([on, on, on])
 
@@ -53,10 +63,26 @@ def hex_to_rgb(h: str) -> Tuple[int, int, int]:
 
 def png_bytes(bgr: np.ndarray, width: int = 480) -> bytes:
     from PIL import Image
-    im = Image.fromarray(bgr[..., ::-1]).resize((width, width * R.HEIGHT // R.WIDTH))
+    im = Image.fromarray(bgr[..., ::-1]).resize((width, width * bgr.shape[0] // bgr.shape[1]))
     buf = io.BytesIO()
     im.save(buf, "PNG")
     return buf.getvalue()
+
+
+def lut_preview_source(width: int = 256) -> np.ndarray:
+    """A small RGB test picture (hue sweep at several brightnesses, a grey ramp, skin-ish tones) to show what a look does."""
+    import colorsys
+    h = 96
+    img = np.zeros((h, width, 3), np.uint8)
+    for x in range(width):
+        for row, (sat, val) in enumerate([(1.0, 1.0), (0.7, 0.8), (0.5, 0.55), (0.9, 0.3)]):
+            r, g, b = colorsys.hsv_to_rgb(x / width, sat, val)
+            img[row * 16:(row + 1) * 16, x] = (int(r * 255), int(g * 255), int(b * 255))
+    img[64:80, :] = np.linspace(0, 255, width).astype(np.uint8)[None, :, None]
+    skin = [(255, 224, 189), (224, 172, 105), (141, 85, 36), (198, 134, 66)]
+    for i in range(width):
+        img[80:96, i] = skin[i * len(skin) // width]
+    return img
 
 
 # ------------------------------------------------------------------ status text
@@ -82,6 +108,8 @@ def status_html(v) -> str:
         row("Filter", st["filter"]),
         row("Temporal average", ("N=%d, %d frame(s) in the average so far" % (st["temporal_average"]["n"], st["temporal_average"]["depth"]))
             if st["temporal_average"]["enabled"] else "off"),
+        *([row("Colour grading", (f"{st['color_grade']['look'] or 'custom'} at {st['color_grade']['strength_percent']} %")
+                                  if st["color_grade"]["enabled"] else "off")] if "color_grade" in st else []),
         row("Hardware clock", f"{st['clock']} &nbsp; ({drift})"),
         row("DMA errors", ", ".join(errs) if errs else "none", bool(errs)),
         row("Frames out", str(inp["out_frames"])),
@@ -123,7 +151,8 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
     fallback.observe(guarded(lambda c: v.input.set_fallback(c["new"])), names="value")
 
     # ---- display: live or an image from video memory
-    images = {"Gradient": image_gradient, "Colour bars": image_bars, "Checkerboard": image_checker,
+    images = {"Gradient": lambda: image_gradient(v.geo), "Colour bars": lambda: image_bars(v.geo),
+              "Checkerboard": lambda: image_checker(v.geo),
               "Last snapshot": lambda: state["snapshot"]}
     display_mode = W.ToggleButtons(options=[("Live video", "live"), ("Video memory", "vmem")], value="live",
                                    description="Display", style={"button_width": "9em"})
@@ -170,6 +199,67 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
 
     tavg_on.observe(guarded(apply_tavg), names="value")
     tavg_n.observe(guarded(apply_tavg), names="value")
+
+    # ---- colour grading: a built-in look or an uploaded .cube file
+    look_pick = W.Dropdown(options=[("Off", "off")] + [(n.replace("_", " ").title(), n) for n in L.look_names()],
+                           value="off", description="Look", disabled=not v.has_lut)
+    look_strength = W.IntSlider(value=100, min=0, max=100, description="Strength", continuous_update=False,
+                                disabled=not v.has_lut)
+    look_upload = W.FileUpload(accept=".cube", multiple=False, description="Upload .cube", disabled=not v.has_lut)
+    look_info = W.Label("" if v.has_lut else "this bitstream has no colour grading (load a v1.2.0 or later one)")
+    look_img = W.Image(format="png", width=384)
+    look_state: Dict[str, object] = {"cube": L.identity_cube(), "busy": False}
+    preview_src = lut_preview_source()
+
+    def show_preview():
+        graded = L.apply_lut(preview_src, look_state["cube"], int(round(look_strength.value * L.STRENGTH_MAX / 100)))
+        look_img.value = png_bytes(graded[..., ::-1], 384)
+
+    def apply_look(_=None):
+        if look_state["busy"]:
+            return
+        name = look_pick.value
+        if name == "off":
+            v.set_look(None)
+            look_state["cube"] = L.identity_cube()
+            look_info.value = "grading off"
+        elif name == "custom":
+            v.set_look(look_state["custom"], look_strength.value)
+            look_state["cube"] = L.resolve(look_state["custom"])
+            look_info.value = f"uploaded table {look_state['custom_name']}"
+        else:
+            v.set_look(name, look_strength.value)
+            look_state["cube"] = L.build_look(name)
+            look_info.value = L.look_description(name)
+        show_preview()
+
+    def apply_look_strength(_=None):
+        if look_state["busy"]:
+            return
+        if look_pick.value != "off":
+            v.set_look_strength(look_strength.value)
+        show_preview()
+
+    def apply_upload(change):
+        files = look_upload.value
+        if not files:
+            return
+        item = files[0] if isinstance(files, (tuple, list)) else list(files.values())[0]       # ipywidgets 8 / 7
+        if isinstance(files, dict):
+            item = dict(list(files.values())[0], name=list(files.keys())[0])
+        data = bytes(item["content"])
+        L.load_cube(data)                                       # parse now so a bad file is reported here
+        look_state["custom"], look_state["custom_name"] = data, item.get("name", "upload.cube")
+        look_state["busy"] = True
+        look_pick.options = list(look_pick.options)[:1 + len(L.look_names())] + [(f"Uploaded: {look_state['custom_name']}", "custom")]
+        look_state["busy"] = False
+        look_pick.value = "custom"
+        apply_look()
+
+    look_pick.observe(guarded(apply_look), names="value")
+    look_strength.observe(guarded(apply_look_strength), names="value")
+    look_upload.observe(guarded(apply_upload), names="value")
+    show_preview()
 
     # ---- timestamp
     ts_on = W.Checkbox(value=v.overlay.enabled(), description="Show timestamp", indent=False)
@@ -240,6 +330,8 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
         W.VBox([display_mode, image_pick]),
         W.HTML("<b>Filter</b>"), W.HBox([mode, threshold]), noise,
         W.HTML("<b>Temporal average</b> (brightness; colour is kept)"), W.HBox([tavg_on, tavg_n]),
+        W.HTML("<b>Colour grading</b> (a look-up table applied after the filter)"), W.HBox([look_pick, look_strength]),
+        W.HBox([look_upload, look_info]), look_img,
         W.HTML("<b>Timestamp</b>"), W.HBox([ts_on, ts_clear, ts_fg, ts_bg]), W.HBox([ts_scale, ts_margin]), W.HBox([tz_box, sync]),
         W.HTML("<b>Snapshot</b>"), W.HBox([snap_btn, save_btn]), snap_info, snap_img,
         W.HTML("<b>Status</b>"), W.HBox([auto, refresh_btn]), status,
@@ -248,7 +340,8 @@ def build_panel(v, refresh_s: float = 1.0, snapshot_dir: str = SNAPSHOT_DIR):
     refresh_btn.on_click(refresh)
     panel.stop = stop_evt.set
     panel.widgets = {"source": source, "fallback": fallback, "display": display_mode, "image": image_pick,
-                     "mode": mode, "threshold": threshold, "noise": noise, "tavg_on": tavg_on, "tavg_n": tavg_n, "ts_on": ts_on, "ts_scale": ts_scale,
+                     "mode": mode, "threshold": threshold, "noise": noise, "tavg_on": tavg_on, "tavg_n": tavg_n, "look": look_pick, "look_strength": look_strength, "look_upload": look_upload,
+                     "look_info": look_info, "look_img": look_img, "ts_on": ts_on, "ts_scale": ts_scale,
                      "ts_margin": ts_margin, "ts_fg": ts_fg, "ts_bg": ts_bg, "ts_clear": ts_clear,
                      "snap": snap_btn, "save": save_btn, "snap_img": snap_img, "tz": tz_box, "sync": sync, "status": status, "log": log,
                      "snap_info": snap_info}

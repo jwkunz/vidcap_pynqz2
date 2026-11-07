@@ -20,6 +20,9 @@ from vidcap import Vidcap, regs as R                             # noqa: E402
 results = []
 
 
+W, H = R.WIDTH, R.HEIGHT
+
+
 def say(msg):
     print(msg, flush=True)
 
@@ -38,7 +41,7 @@ BARS_BGR = [(255, 255, 255), (0, 255, 255), (255, 255, 0), (0, 255, 0),
 def bar_colours(img, rows):
     """Colour at the centre of each of the 8 bars, taking the value most rows agree on."""
     out = []
-    w = R.WIDTH // 8
+    w = W // 8
     for i in range(8):
         samples = [tuple(int(c) for c in img[y, i * w + w // 2]) for y in rows]
         out.append(max(set(samples), key=samples.count))
@@ -46,10 +49,13 @@ def bar_colours(img, rows):
 
 
 def main():
-    bit = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vidcap.bit")
-    say(f"== load {bit}")
+    global W, H
+    mode = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("VIDCAP_MODE", R.DEFAULT_MODE)
+    geo = R.MODES[mode]
+    W, H = geo.width, geo.height
+    say(f"== load the {mode} bitstream ({W}x{H})")
     t0 = time.time()
-    v = Vidcap.on_pynq(bit)
+    v = Vidcap.on_pynq(mode=mode)
     say(f"   downloaded in {time.time() - t0:.2f} s")
     try:
         say("== block IDs (first AXI reads)")
@@ -73,16 +79,16 @@ def main():
             check(f"VDMA {name} running without errors after start-up", not ch["halted"] and not ch["errors"],
                   f"halted={ch['halted']} errors={ch['errors']} raw=0x{ch['raw']:08X}")
         # what the DMA itself wrote into the live ring (not the snapshot core's copy)
-        rings = [bar_colours(fb.array, [10, 700]) == BARS_BGR for fb in v._live]
+        rings = [bar_colours(fb.array, [10, H - 20]) == BARS_BGR for fb in v._live]
         check("DMA wrote the colour bars into all 3 live-ring frames", all(rings), f"{sum(rings)} of 3")
 
         say("== snapshot of the test pattern")
         t0 = time.time()
         img = v.snapshot()
         say(f"   took {1000 * (time.time() - t0):.0f} ms")
-        check("snapshot has the right shape", img.shape == (R.HEIGHT, R.WIDTH, 3), str(img.shape))
-        rows = [10, 700, 710]            # rows the moving box can only partly reach
-        got = bar_colours(img, [r for r in rows if r < R.HEIGHT])
+        check("snapshot has the right shape", img.shape == (H, W, 3), str(img.shape))
+        rows = [10, H - 20, H - 10]            # rows the moving box can only partly reach
+        got = bar_colours(img, [r for r in rows if r < H])
         check("8 colour bars in the right order and byte order (B,G,R)", got == BARS_BGR,
               "" if got == BARS_BGR else f"got {got}")
         img2 = v.snapshot()
@@ -101,8 +107,8 @@ def main():
         check("filter mode reads back", v.filter.mode() == "passthrough", v.filter.mode())
 
         say("== video memory (double-buffered flip)")
-        grad = np.zeros((R.HEIGHT, R.WIDTH, 3), np.uint8)
-        grad[..., 0] = np.linspace(0, 255, R.WIDTH, dtype=np.uint8)
+        grad = np.zeros((H, W, 3), np.uint8)
+        grad[..., 0] = np.linspace(0, 255, W, dtype=np.uint8)
         v.show_image(grad)
         time.sleep(0.5)
         f0 = v.mux.frames()
@@ -151,12 +157,12 @@ def main():
         # what the hardware wrote: the history ring holds brightness, the sum frame holds 16 x brightness
         buf = v._tavgbuf.array
         slots = v.history_frames
-        ring = buf[:slots * R.TAVG_LUMA_FRAME_BYTES].reshape(slots, R.HEIGHT, R.WIDTH)
-        sums = buf[slots * R.TAVG_LUMA_FRAME_BYTES:].view("<u2").reshape(R.HEIGHT, R.WIDTH)
+        ring = buf[:slots * geo.luma_frame_bytes].reshape(slots, H, W)
+        sums = buf[slots * geo.luma_frame_bytes:].view("<u2").reshape(H, W)
         bar_rgb = [(255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0), (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)]
         bar_luma = [(77 * r + 150 * g + 29 * b) >> 8 for r, g, b in bar_rgb]
-        w8 = R.WIDTH // 8
-        samples = [(y, i) for i in range(8) for y in range(8, R.HEIGHT, 40)]      # the moving box covers well under 5%
+        w8 = W // 8
+        samples = [(y, i) for i in range(8) for y in range(8, H, 40)]      # the moving box covers well under 5%
         ring_ok = sum(all(int(ring[k, y, i * w8 + w8 // 2]) == bar_luma[i] for k in range(slots)) for y, i in samples)
         sum_ok = sum(int(sums[y, i * w8 + w8 // 2]) == 16 * bar_luma[i] for y, i in samples)
         check("history ring holds the brightness of the colour bars in all 16 slots", ring_ok >= 0.9 * len(samples),
@@ -171,12 +177,56 @@ def main():
         check("the average switches off", not v.tavg.enabled())
         v.input.set_source("hdmi")
 
+        say("== colour grading (look-up table): checked pixel by pixel against the bit-exact model")
+        if v.has_lut:
+            from vidcap import lut as L
+            v.lut.check()
+            check("colour grading block answers with the right ID", True)
+            v.set_filter("passthrough")
+            v.set_temporal_average(None)
+            colours = [(0, 0, 0), (255, 255, 255), (255, 0, 0), (0, 255, 0), (0, 0, 255), (16, 16, 16), (15, 240, 99),
+                       (200, 120, 40), (33, 77, 221), (128, 128, 128), (250, 5, 130), (1, 254, 17)]
+
+            def probe_all(cube, strength_code, label):
+                ok_in = ok_out = 0
+                bad = []
+                for rgb in colours:
+                    img = np.zeros((H, W, 3), np.uint8)
+                    img[..., 0], img[..., 1], img[..., 2] = rgb[2], rgb[1], rgb[0]       # memory order B, G, R
+                    v.show_image(img)
+                    time.sleep(0.12)
+                    pin, pout = v.lut.probe()
+                    want = tuple(int(x) for x in L.apply_lut(np.array(rgb, np.uint8), cube, strength_code))
+                    ok_in += pin == rgb
+                    ok_out += pout == want
+                    if pout != want:
+                        bad.append((rgb, pout, want))
+                check(f"{label}: the table sees the colour that was shown", ok_in == len(colours), f"{ok_in} of {len(colours)}")
+                check(f"{label}: output equals the model for every colour", ok_out == len(colours),
+                      f"{ok_out} of {len(colours)}" + (f"; first mismatch {bad[0]}" if bad else ""))
+
+            v.set_look("teal_orange", strength=100)
+            check("a built-in look loads and verifies (4913 nodes, checksum)", v.lut.enabled() and v.look == "teal_orange")
+            probe_all(L.build_look("teal_orange"), 256, "teal_orange at 100 %")
+            v.set_look_strength(50)
+            time.sleep(0.1)
+            probe_all(L.build_look("teal_orange"), 128, "teal_orange at 50 %")
+            rnd = np.random.default_rng(5).integers(0, 256, (17, 17, 17, 3), dtype=np.uint8)
+            v.set_look(rnd, strength=100)
+            probe_all(rnd, 256, "a random table (checks every bank and the address layout)")
+            v.set_look(None)
+            time.sleep(0.1)
+            probe_all(L.identity_cube(), 0, "grading off")
+            v.show_live()
+        else:
+            say("   this bitstream has no colour grading: skipped")
+
         say("== HDMI input")
         v.use_test_pattern(False)
         time.sleep(1.5)
         st = v.input.status()
         if st["hdmi_good"]:
-            say("   a live 1280x720 HDMI source is connected: checking passthrough instead of the no-signal fallback")
+            say(f"   a live {W}x{H} HDMI source is connected: checking passthrough instead of the no-signal fallback")
             a = v.input.status()
             time.sleep(1.0)
             b = v.input.status()

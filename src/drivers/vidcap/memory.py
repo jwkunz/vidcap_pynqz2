@@ -4,11 +4,15 @@ from __future__ import annotations
 import mmap
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
-from .regs import FRAME_BYTES, HEIGHT, WIDTH
+from .regs import FRAME_BYTES, HEIGHT, MODES, WIDTH, Geometry
+
+
+def _geo(geo):
+    return geo or MODES["720p"]
 
 
 @dataclass
@@ -29,9 +33,9 @@ class PynqAllocator:
     """Contiguous buffers from PYNQ's CMA allocator (the default on the board). Addresses differ
     from run to run; the driver always reads them back from the buffer object."""
 
-    def alloc(self) -> FrameBuffer:
+    def alloc(self, geo: Optional[Geometry] = None) -> FrameBuffer:
         from pynq import allocate
-        buf = allocate(shape=(HEIGHT, WIDTH, 3), dtype=np.uint8)
+        buf = allocate(shape=_geo(geo).shape, dtype=np.uint8)
         return FrameBuffer(int(buf.physical_address), buf, buf)
 
     def alloc_bytes(self, nbytes: int) -> FrameBuffer:
@@ -60,12 +64,13 @@ class ReservedRegion:
         finally:
             os.close(fd)
 
-    def alloc(self) -> FrameBuffer:
-        step = (FRAME_BYTES + 0xFFF) & ~0xFFF
+    def alloc(self, geo: Optional[Geometry] = None) -> FrameBuffer:
+        g = _geo(geo)
+        step = (g.frame_bytes + 0xFFF) & ~0xFFF
         if self._next + step > self.size:
             raise MemoryError("reserved region is full")
         off, self._next = self._next, self._next + step
-        arr = np.frombuffer(self._map, dtype=np.uint8, count=FRAME_BYTES, offset=off).reshape(HEIGHT, WIDTH, 3)
+        arr = np.frombuffer(self._map, dtype=np.uint8, count=g.frame_bytes, offset=off).reshape(g.shape)
         return FrameBuffer(self.base + off, arr)
 
     def alloc_bytes(self, nbytes: int) -> FrameBuffer:
@@ -83,9 +88,10 @@ class HeapAllocator:
         self._next = base
         self.allocated: List[FrameBuffer] = []
 
-    def alloc(self) -> FrameBuffer:
-        fb = FrameBuffer(self._next, np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8))
-        self._next += (FRAME_BYTES + 0xFFF) & ~0xFFF
+    def alloc(self, geo: Optional[Geometry] = None) -> FrameBuffer:
+        g = _geo(geo)
+        fb = FrameBuffer(self._next, np.zeros(g.shape, dtype=np.uint8))
+        self._next += (g.frame_bytes + 0xFFF) & ~0xFFF
         self.allocated.append(fb)
         return fb
 

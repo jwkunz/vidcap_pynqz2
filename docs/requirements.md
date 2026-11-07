@@ -1,13 +1,13 @@
-# vidcap_pynqz2 - Requirements and design (v1.1.0)
+# vidcap_pynqz2 - Requirements and design (v1.2.0)
 
-Status: **v1.1.0.** Everything below is implemented and verified in simulation and by a timing-clean
+Status: **v1.2.0.** Everything below is implemented and verified in simulation and by a timing-clean
 Vivado build. It has also been run on a PYNQ-Z2 with the built-in test pattern as the only video source
 (section 5). **A real HDMI source and a monitor have not been tried.**
 
 ## 1. Goal
 
 HDMI video in → programmable video processing → HDMI video out on a PYNQ-Z2 (Zynq-7020), controlled
-from Jupyter via PYNQ. Fixed format: **1280x720 @ 60 Hz, 24-bit RGB**.
+from Jupyter via PYNQ. One format per bitstream, output equal to input: **720p 1280x720, 480p 720x480 or 240p 1440x240, about 60 Hz, 24-bit RGB** (see `src/overlay/modes/`). The 1280x720 figures below describe the 720p build; the others scale the same way.
 
 ## 2. Architecture
 
@@ -21,7 +21,7 @@ from Jupyter via PYNQ. Fixed format: **1280x720 @ 60 Hz, 24-bit RGB**.
                               (select, pace,    (in series;                                    │
                                fallback, frame   writes 1 frame                                ▼
                                normaliser)       to DDR on trigger)          VDMA live MM2S ──┐
-                                                                                                ├─► vc_stream_mux ─► vc_tavg ─► vc_filter ─► vc_overlay ─► swap ─┐
+                                                                                                ├─► vc_stream_mux ─► vc_tavg ─► vc_filter ─► vc_lut3d ─► vc_overlay ─► swap ─┐
                                               DDR [video memory x2] ─► VDMA vmem MM2S ──────────┘   (live/vmem) (temporal) (8 modes)      (timestamp)         │
                                                                                                                                                     ▼
                                                                           vc_rtc (hardware clock) ───────────────────► time digits ─► vc_overlay      v_axi4s_vid_out
@@ -87,6 +87,17 @@ Control: PS → AXI-Lite → a register block on every core. Interrupts: AXI INT
   N x 55 MB/s even for brightness only, which exceeds the memory bandwidth beyond roughly 14 taps at 60 fps. The running
   sum gives any N for equal weights.
 
+### Colour grading
+- **REQ-LUT-1** A 3D look-up table (17x17x17 nodes, 24-bit colours, trilinear interpolation) maps every pixel after the filter and
+  before the timestamp, one pixel per clock, for live video, the test pattern and video memory alike.
+- **REQ-LUT-2** Software loads any table through a register window and can verify the load (write count and checksum). The table
+  holds an identity after configuration, so enabling it with nothing loaded changes nothing.
+- **REQ-LUT-3** A strength register (0..256) blends between the original and the graded pixel. Enable and strength take effect at
+  the start of a frame.
+- **REQ-LUT-4** The driver offers built-in looks (generated from formulas in `vidcap/lut.py`, no third-party files) and loads
+  `.cube` files (3D any size, or 1D; domain honoured; resampled to 17 nodes).
+- **REQ-LUT-5** The interpolation is bit-exact against a Python model (`vidcap.lut.apply_lut`), which previews and tests use.
+
 ### Video memory
 - **REQ-VMEM-1** Software writes a 1280x720 RGB888 image to DDR and selects it for display.
 - **REQ-VMEM-2** Double-buffered: write the hidden buffer, flip the park pointer, no tearing.
@@ -128,21 +139,30 @@ Control: PS → AXI-Lite → a register block on every core. Interrupts: AXI INT
 | FLT-1..4 | `vc_filter` | C-sim: 8 modes x 2 images vs golden model, 2-frame, junk-before-SOF; co-simulation |
 | FLT-6 | `vc_filter` (mode 7) | C-sim vs a golden LFSR model: amounts 0/1/40/255, grain differs per frame, grey noise; co-simulation |
 | TAVG-1..5 | `vc_tavg` | C-sim vs a golden model built from a plain list of frames (warm-up, N changes, ring wrap, N = ring size, clamping, restarts, disable/enable, exact constant picture) plus a check of the ring and sum frame in memory after every frame; a deliberate fault is caught; RTL co-simulation |
+| LUT-1..3, 5 | `vc_lut3d` | `tb_vc_lut3d`: every output pixel of 640 equals the Python model, for the power-up identity table, a random table (all 8 banks, address layout) at strength 256 and 100, with random stalls on both stream sides; write count, checksum, probes, bypass |
+| LUT-4 | `vidcap/lut.py` | `test_lut.py`: built-in looks, `.cube` parsing (sizes, channel order, domain, 1D, bad files) |
 | FLT-5, VMEM-3 | `vc_stream_mux` ahead of `vc_filter` | block design; `tb_vc_stream_mux` |
 | VMEM-1, 2 | `vdma_vmem`, `vc_stream_mux`, `Vidcap.show_image` | `tb_vc_stream_mux` (frame-aligned switch), driver tests |
 | OUT-1, 2 | `v_tc` (fixed 720p), `v_axi4s_vid_out`, `clk_wiz` (74.25 MHz exact) | timing-clean implementation |
 | OUT-3 | `vc_stream_mux`, `vc_input_sel` | `tb_vc_stream_mux`, `tb_vc_input_sel` |
 | TS-1..6 | `vc_rtc`, `vc_overlay` | `tb_vc_rtc` (14 checks: leap years, 1900/2000, rollovers, bad dates, CPS trim, power-up); `vc_overlay` C-sim + co-simulation |
-| SW-1, SW-2 | `src/drivers`, `docs/register_map.md` | 25 driver unit tests, including a check that every HLS register offset matches the generated headers |
+| SW-1, SW-2 | `src/drivers`, `docs/register_map.md` | 112 driver unit tests, including a check that every HLS register offset matches the generated headers |
 
 ## 5. Resources, timing and board results (Vivado 2025.2, xc7z020clg400-1)
 
-Implementation (with the noise mode and the temporal average): 13,580 LUTs (26%), 19,272 registers (18%), 32.5 BRAM tiles
-(23%), 39 DSPs (18%); setup slack +0.68 ns, hold slack +0.013 ns. The temporal-average core is about 6.5k LUTs, 18 BRAM tiles and
-7 DSPs, and processes a frame in 9.46 ms. See `workspace/vivado/out/` after `make overlay`.
+Implementation of v1.2.0 (with the noise mode, the temporal average and the colour-grading table), one bitstream per mode:
+
+| Mode | LUTs | BRAM tiles | DSPs | Setup slack | Hold slack |
+|---|---|---|---|---|---|
+| 720p | 15,783 (30%) | 40.5 (29%) | 48 (22%) | +0.232 ns | +0.051 ns |
+| 480p | 15,753 (30%) | 34.5 (25%) | 50 (23%) | +0.550 ns | +0.013 ns |
+| 240p | 15,755 (30%) | 41.5 (30%) | 50 (23%) | +0.705 ns | +0.017 ns |
+
+The colour-grading core adds about 8 BRAM tiles and 21 DSPs. Reports are under `workspace/vivado/out_<mode>/` after `make overlay`. The temporal-average core is about 6.5k LUTs, 18 BRAM tiles and
+7 DSPs, and processes a frame in 9.46 ms. 
 The build **fails** if setup or hold timing is not met.
 
-**On the board** (`src/drivers/tests/hw_smoke.py`, test pattern as the source, 33 of 33 checks pass):
+**On the board** (`src/drivers/tests/hw_smoke.py <mode>`, test pattern as the source; v1.2.0: 43 of 43 checks pass in each of 720p, 480p and 240p; the earlier rows below were measured at 720p):
 
 | Verified on hardware | Evidence |
 |---|---|

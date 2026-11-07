@@ -208,7 +208,7 @@ class _Traced(FakeMmio):
 
 
 def _fake_pipeline():
-    ids = {"rtc": {R.RTC_ID: R.RTC_MAGIC}, "isel": {R.ISEL_ID: R.ISEL_MAGIC}, "vmux": {R.VMUX_ID: R.VMUX_MAGIC}}
+    ids = {"rtc": {R.RTC_ID: R.RTC_MAGIC}, "isel": {R.ISEL_ID: R.ISEL_MAGIC}, "vmux": {R.VMUX_ID: R.VMUX_MAGIC}, "lut": {R.LUT_ID: R.LUT_MAGIC}}
     by_base, trace = {}, []
     def mmio_for(base):
         name = next(n for n, b in R.BASES.items() if b == base)
@@ -476,9 +476,9 @@ class TestRegisterMapsMatchGenerated(unittest.TestCase):
     """The HLS tools generate the true register offsets; they must agree with regs.py."""
 
     def _defines(self, core):
-        pat = os.path.join(ROOT, "workspace", "vitishls", f"{core}_build", "work", "hls", "impl", "ip", "drivers",
+        pat = os.path.join(ROOT, "workspace", "vitishls", f"{core}_build_*", "work", "hls", "impl", "ip", "drivers",
                            f"{core}_v1_0", "src", f"x{core}_hw.h")
-        files = glob.glob(pat)
+        files = sorted(glob.glob(pat))           # the register layout is the same in every video mode
         if not files:
             self.skipTest(f"{core} has not been packaged (run its package step first)")
         out = {}

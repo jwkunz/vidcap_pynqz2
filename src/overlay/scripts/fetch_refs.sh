@@ -24,3 +24,6 @@ fi
 # shellcheck disable=SC2086
 git -C "$DEST/PYNQ" sparse-checkout set $PATHS
 echo "fetched PYNQ $PYNQ_TAG ($(git -C "$DEST/PYNQ" rev-parse --short HEAD)) into $DEST/PYNQ"
+
+# patched local copy of the Digilent HDMI IP (extra clock bands and the 480p/240p EDIDs)
+python3 "$ROOT/src/overlay/scripts/prepare_ip.py"

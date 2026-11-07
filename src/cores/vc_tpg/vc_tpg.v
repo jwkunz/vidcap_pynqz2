@@ -44,7 +44,9 @@ module vc_tpg #(
 
     // colour bars
     reg [23:0] bar;
-    wire [2:0] bar_idx = (x / BAR_W > 7) ? 3'd7 : (x / BAR_W);
+    // bar index and the position inside the bar are counted along with x, so there is no division in the data path
+    reg [2:0]  bar_idx;
+    reg [10:0] bar_cnt;
     always @* begin
         case (bar_idx)
             3'd0: bar = 24'hFFFFFF;   // white
@@ -68,8 +70,13 @@ module vc_tpg #(
 
     always @(posedge aclk) begin
         if (!aresetn) begin
-            x <= 0; y <= 0; bx <= 0; by <= 0; dir_x <= 1'b1; dir_y <= 1'b1;
+            x <= 0; y <= 0; bx <= 0; by <= 0; dir_x <= 1'b1; dir_y <= 1'b1; bar_idx <= 3'd0; bar_cnt <= 11'd0;
         end else if (xfer) begin
+            if (last_x) begin bar_idx <= 3'd0; bar_cnt <= 11'd0; end
+            else if (bar_cnt == BAR_W - 1) begin
+                bar_cnt <= 11'd0;
+                if (bar_idx != 3'd7) bar_idx <= bar_idx + 3'd1;
+            end else bar_cnt <= bar_cnt + 11'd1;
             if (last_x) begin
                 x <= 0;
                 if (last_y) begin

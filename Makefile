@@ -3,8 +3,9 @@
 # Sources live in src/; every generated file goes under workspace/ (untracked).
 #
 #   make test        all simulations and unit tests (no hardware)
-#   make overlay     build the bitstream from scratch (HLS cores -> IP -> Vivado)
-#   make dist        collect what goes on the board into workspace/dist/vidcap/
+#   make overlay     build the bitstream for one video mode from scratch (HLS cores -> IP -> Vivado); MODE=720p|480p|240p
+#   make overlay-all build all three video modes
+#   make dist        collect what goes on the board (every mode built so far) into workspace/dist/vidcap/
 #   make deploy BOARD=xilinx@192.168.2.82     copy dist to the board and set its time zone (TZ_NAME=America/New_York;
 #                                             TZ_NAME= to leave it alone). Asks for the board password.
 #   make clean       delete everything generated (the workspace folder layout stays)
@@ -15,15 +16,17 @@
 SHELL     := /bin/bash
 ROOT      := $(CURDIR)
 CORES_HLS := vc_filter vc_overlay vc_snapshot vc_tavg
+# video modes (src/overlay/modes/<mode>.env): each is its own bitstream, sized for its frame
+MODES     := 720p 480p 240p
+MODE      ?= 720p
 SIM       := src/cores/vc_common/run_xsim.sh
 HLS       := src/cores/vc_common/run_hls.sh
-OUT       := workspace/vivado/out
 DIST      := workspace/dist/vidcap
 BOARD     ?= xilinx@192.168.2.82
 # Time zone the board uses for the on-screen clock (default: this computer's). TZ_NAME= (empty) leaves it alone.
 TZ_NAME   ?= $(shell timedatectl show -p Timezone --value 2>/dev/null)
 
-.PHONY: all test test-rtl test-hls test-cosim test-drivers refs hls-package ip overlay dist deploy gen-tcl clean version
+.PHONY: all test test-rtl test-hls test-cosim test-drivers refs hls-package ip overlay overlay-all dist deploy gen-tcl clean version
 
 all: test overlay dist
 
@@ -37,6 +40,8 @@ test-rtl:
 	$(SIM) tb_vc_rtc          src/cores/vc_common/vc_axil_bridge.v src/cores/vc_rtc/vc_rtc.v src/cores/vc_rtc/tb/tb_vc_rtc.v
 	$(SIM) tb_vc_input_sel    src/cores/vc_common/vc_axil_bridge.v src/cores/vc_input_sel/vc_input_sel.v src/cores/vc_input_sel/tb/tb_vc_input_sel.v
 	$(SIM) tb_vc_tpg          src/cores/vc_tpg/vc_tpg.v src/cores/vc_tpg/tb/tb_vc_tpg.v
+	python3 src/cores/vc_lut3d/tb/gen_vectors.py workspace/vivado/sim/lut_vectors
+	$(SIM) tb_vc_lut3d        src/cores/vc_common/vc_axil_bridge.v src/cores/vc_lut3d/vc_lut3d.v src/cores/vc_lut3d/tb/tb_vc_lut3d.v
 	$(SIM) tb_vc_stream_mux   src/cores/vc_common/vc_axil_bridge.v src/cores/vc_stream_mux/vc_stream_mux.v src/cores/vc_stream_mux/tb/tb_vc_stream_mux.v
 
 test-hls:
@@ -53,22 +58,25 @@ refs:
 	src/overlay/scripts/fetch_refs.sh
 
 hls-package:
-	@for c in $(CORES_HLS); do echo "== package $$c"; $(HLS) $$c package >/dev/null || exit 1; done
+	@for c in $(CORES_HLS); do echo "== package $$c ($(MODE))"; MODE=$(MODE) $(HLS) $$c package >/dev/null || exit 1; done
 
 ip: hls-package
-	src/overlay/scripts/collect_ip.sh
+	src/overlay/scripts/collect_ip.sh $(MODE)
 
 overlay: refs ip
 	# run from inside workspace/ so Vivado scratch files (.Xil, NA/) never land in the source tree
 	source $${AMD_ROOT:-$$HOME/AMD}/2025.2/Vitis/settings64.sh >/dev/null 2>&1; \
-	cd workspace/vivado && vivado -mode batch -nolog -nojournal -source $(ROOT)/src/overlay/scripts/build.tcl -tclargs $(ROOT) bit
+	cd workspace/vivado && vivado -mode batch -nolog -nojournal -source $(ROOT)/src/overlay/scripts/build.tcl -tclargs $(ROOT) bit $(MODE)
+
+overlay-all:
+	@for m in $(MODES); do $(MAKE) overlay MODE=$$m || exit 1; done
 
 # ------------------------------------------------------------------ packaging for the board
 dist:
-	@test -f $(OUT)/vidcap.bit || { echo "no bitstream: run 'make overlay' first"; exit 1; }
+	@ls workspace/vivado/out_*/vidcap_*.bit >/dev/null 2>&1 || { echo "no bitstream: run 'make overlay' (or overlay-all) first"; exit 1; }
 	rm -rf $(DIST)
 	mkdir -p $(DIST)
-	cp $(OUT)/vidcap.bit $(OUT)/vidcap.hwh $(DIST)/
+	cp workspace/vivado/out_*/vidcap_*.bit workspace/vivado/out_*/vidcap_*.hwh $(DIST)/
 	cp -r src/drivers/vidcap $(DIST)/vidcap
 	cp -r src/notebooks/* $(DIST)/
 	cp VERSION $(DIST)/

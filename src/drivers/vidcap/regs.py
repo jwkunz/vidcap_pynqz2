@@ -18,11 +18,55 @@ BASES = {
     "snap":      0x4007_0000,   # vc_snapshot       (HLS)
     "intc":      0x4008_0000,   # AXI interrupt controller
     "tavg":      0x4009_0000,   # vc_tavg           temporal average over the last N frames (HLS)
+    "lut":       0x400A_0000,   # vc_lut3d          colour grading look-up table (RTL)
 }
 WINDOW = 0x1_0000
 
-# Frame geometry: 1280x720, 3 bytes per pixel, memory byte order B, G, R.
-WIDTH, HEIGHT, BPP = 1280, 720, 3
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Geometry:
+    """One video mode. Each mode is its own bitstream, sized for its frame (src/overlay/modes/<name>.env)."""
+    name: str
+    width: int
+    height: int
+    pixel_mhz: float
+
+    @property
+    def line_bytes(self) -> int:           # 3 bytes per pixel, memory byte order B, G, R
+        return self.width * 3
+
+    @property
+    def frame_bytes(self) -> int:
+        return self.line_bytes * self.height
+
+    @property
+    def luma_frame_bytes(self) -> int:     # one brightness frame of the temporal average's history
+        return self.width * self.height
+
+    @property
+    def sum_frame_bytes(self) -> int:      # its 16-bit running-sum frame
+        return self.width * self.height * 2
+
+    @property
+    def bitfile(self) -> str:
+        return f"vidcap_{self.name}.bit"
+
+    @property
+    def shape(self):
+        return (self.height, self.width, 3)
+
+
+MODES = {
+    "720p": Geometry("720p", 1280, 720, 74.25),     # CEA VIC 4
+    "480p": Geometry("480p", 720, 480, 27.0),       # CEA VIC 2/3
+    "240p": Geometry("240p", 1440, 240, 27.0),      # CEA VIC 8/9: 720 real pixels per line, each sent twice
+}
+DEFAULT_MODE = "720p"
+
+# The default (720p) geometry as plain constants, for code that does not care about the mode.
+WIDTH, HEIGHT, BPP = MODES[DEFAULT_MODE].width, MODES[DEFAULT_MODE].height, 3
 LINE_BYTES = WIDTH * BPP
 FRAME_BYTES = LINE_BYTES * HEIGHT
 
@@ -64,6 +108,14 @@ TAVG_ENABLE, TAVG_N, TAVG_SLOTS, TAVG_RESTART, TAVG_STATUS = 0x28, 0x30, 0x38, 0
 TAVG_MAX_N = 255
 TAVG_LUMA_FRAME_BYTES = WIDTH * HEIGHT             # one history frame: 8-bit brightness
 TAVG_SUM_FRAME_BYTES = WIDTH * HEIGHT * 2          # the running-sum frame: 16 bits per pixel
+
+# ---- vc_lut3d (RTL): 17x17x17 colour cube, trilinear interpolation -----------------------------
+LUT_ID, LUT_CTRL, LUT_STRENGTH, LUT_FRAMES, LUT_WRITES, LUT_CHECKSUM = 0x00, 0x04, 0x08, 0x0C, 0x10, 0x14
+LUT_PROBE_IN, LUT_PROBE_OUT = 0x18, 0x1C
+LUT_MAGIC = 0x4C55_5403
+LUT_CTRL_ENABLE, LUT_CTRL_CLEAR = 1 << 0, 1 << 1
+LUT_CUBE = 0x8000                       # write-only window: 8 banks x 4 KiB, see vidcap.lut.to_bank_words()
+LUT_STRENGTH_MAX = 256
 
 # ---- AXI VDMA (Xilinx PG020) -----------------------------------------------------------------
 VDMA_MM2S_CR, VDMA_MM2S_SR = 0x00, 0x04

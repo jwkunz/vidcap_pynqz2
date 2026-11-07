@@ -14,7 +14,7 @@ Run both with `make gen-tcl`.
 ## HLS cores
 
 `<core>_sim.tcl` rebuilds the HLS workspace at the small simulation frame size and runs C-simulation,
-synthesis and C/RTL co-simulation. `<core>_build.tcl` does the production build (1280x720, free-running
+synthesis and C/RTL co-simulation. `<core>_build.tcl` does the production build (the size of the mode in `src/overlay/modes/`, `MODE=720p` by default, free-running
 `ap_ctrl_none`) and exports the IP to `workspace/vitishls/generated/ip/<core>.zip`.
 
 ```

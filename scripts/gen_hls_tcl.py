@@ -26,6 +26,15 @@ OUT = os.path.join(ROOT, "workspace", "vitishls", "generated")
 COMMON = os.path.join(CORES_DIR, "vc_common")
 
 
+def mode_dims():
+    """Frame size of the production build: from src/overlay/modes/$MODE.env (default 720p)."""
+    import os, re
+    mode = os.environ.get("MODE", "720p")
+    t = open(os.path.join(ROOT, "src", "overlay", "modes", f"{mode}.env")).read()
+    v = dict(re.findall(r"^([A-Z_]+)=(\S+)", t, re.M))
+    return int(v["WIDTH"]), int(v["HEIGHT"])
+
+
 def parse_cfg(text):
     """Return ({top-level key: value}, {[hls] key: value}) from a Vitis config file."""
     top, hls, section = {}, {}, None
@@ -62,7 +71,7 @@ def substitute(text, core_dir, w, h, ctrl):
 
 def render(core, core_dir, variant, cfg_text):
     sim = variant == "sim"
-    w, h = sim_dims(core_dir) if sim else (1280, 720)
+    w, h = sim_dims(core_dir) if sim else mode_dims()
     text = substitute(cfg_text, core_dir, w, h, "" if sim else "-DVC_CTRL_NONE")
     top, hls = parse_cfg(text)
     clock = hls.get("clock", "10ns").replace("ns", "")
