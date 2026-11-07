@@ -1,6 +1,6 @@
 # vidcap_pynqz2
 
-**Version 1.0.0** (see `VERSION`)
+**Version 1.1.0** (see `VERSION`)
 
 HDMI video capture, live filtering and display for the **PYNQ-Z2** (Zynq-7020), controlled from Jupyter.
 

@@ -1,6 +1,6 @@
-# vidcap_pynqz2 - Requirements and design (v1.0.0)
+# vidcap_pynqz2 - Requirements and design (v1.1.0)
 
-Status: **v1.0.0.** Everything below is implemented and verified in simulation and by a timing-clean
+Status: **v1.1.0.** Everything below is implemented and verified in simulation and by a timing-clean
 Vivado build. It has also been run on a PYNQ-Z2 with the built-in test pattern as the only video source
 (section 5). **A real HDMI source and a monitor have not been tried.**
 
