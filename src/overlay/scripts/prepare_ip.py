@@ -2,7 +2,7 @@
 """prepare_ip.py - Make a patched local copy of the Digilent HDMI IP in workspace/vivado/ip_local.
 
 Why a patched copy: the stock IP definitions only offer two receiver/transmitter clock bands (>=120 MHz, <120 MHz)
-and four fixed EDID files, although the VHDL supports five bands and any EDID file. The 480p and 240p builds need
+and four fixed EDID files, although the VHDL supports five bands and any EDID file. The non-720p builds need
 the 24..48 MHz band (band 5) and their own EDIDs. The original files under workspace/vivado/refs stay untouched.
 
     ip_local/dvi2rgb_v1_7    receiver: + clock bands 3..5, + 480p_edid.data and 240p_edid.data (generated here)
@@ -55,7 +55,7 @@ def main():
 
     # ---- receiver
     rx = LOCAL / "dvi2rgb_v1_7"
-    edids = ["480p", "240p"]
+    edids = ["480p", "240p", "1080p30", "xga"]
     for m in edids:
         data, _ = gen_edid.build(m)
         gen_edid.write(rx / "src" / f"{m}_edid.data", data)

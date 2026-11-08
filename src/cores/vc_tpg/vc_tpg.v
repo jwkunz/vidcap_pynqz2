@@ -31,9 +31,9 @@ module vc_tpg #(
     localparam integer BAR_W = W / 8;
 
     reg [10:0] x;
-    reg [9:0]  y;
+    reg [10:0] y;
     reg [10:0] bx;          // box left edge
-    reg [9:0]  by;          // box top edge
+    reg [10:0] by;          // box top edge
     reg        dir_x, dir_y;  // 1 = moving toward larger coordinates
 
     wire last_x = (x == W - 1);

@@ -32,6 +32,7 @@ class Geometry:
     width: int
     height: int
     pixel_mhz: float
+    fps: float = 60.0          # nominal frame rate: paces the built-in test pattern
 
     @property
     def line_bytes(self) -> int:           # 3 bytes per pixel, memory byte order B, G, R
@@ -62,6 +63,8 @@ MODES = {
     "720p": Geometry("720p", 1280, 720, 74.25),     # CEA VIC 4
     "480p": Geometry("480p", 720, 480, 27.0),       # CEA VIC 2/3
     "240p": Geometry("240p", 1440, 240, 27.0),      # CEA VIC 8/9: 720 real pixels per line, each sent twice
+    "1080p30": Geometry("1080p30", 1920, 1080, 74.25, 30.0),   # CEA VIC 34
+    "xga": Geometry("xga", 1024, 768, 65.0),        # VESA DMT 0x10
 }
 DEFAULT_MODE = "720p"
 

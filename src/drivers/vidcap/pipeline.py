@@ -20,6 +20,15 @@ N_VMEM_FRAMES = 2      # video memory, double-buffered
 FRAME_TIME_S = 1 / 60  # one output frame
 
 
+def default_history_frames(geo: R.Geometry) -> int:
+    """Frames of temporal-average history reserved by default: 16, or 8 when a frame is larger than 3 MB.
+
+    The pool of contiguous memory is 128 MB, of which about 68 MB is free after boot, and every bitstream load leaks a
+    few MB. At 1080p the 6 video buffers alone take 37 MB, so 16 frames of history (37 MB more) would not fit.
+    """
+    return 16 if geo.frame_bytes <= 3_000_000 else 8
+
+
 class Vidcap:
     """HDMI in -> filter -> timestamp -> HDMI out, plus snapshot and video-memory display.
 
@@ -107,7 +116,7 @@ class Vidcap:
             self.lut.check()
 
     def start(self, source: str = "hdmi", fallback: bool = True, sync_time: bool = True,
-              timestamp: bool = True, tz: Optional[str] = None, history_frames: int = 16) -> None:
+              timestamp: bool = True, tz: Optional[str] = None, history_frames: Optional[int] = None) -> None:
         """tz: show the time in this IANA zone (for example "America/New_York"); default is the board's zone.
         history_frames: how many frames of brightness history to reserve for the temporal average, which can then
         average over up to that many frames. Costs one byte per pixel per frame plus two for the sum frame
@@ -122,6 +131,8 @@ class Vidcap:
         self._snapbuf = a.alloc(self.geo)
         for fb in self._live + self._vmem + [self._snapbuf]:
             fb.array[:] = 0
+        if history_frames is None:
+            history_frames = default_history_frames(self.geo)
         self.history_frames = int(history_frames)
         self._tavgbuf = a.alloc_bytes(TemporalAverage.bytes_needed(self.history_frames, self.geo))
         self._tavgbuf.array[:] = 0
@@ -132,6 +143,8 @@ class Vidcap:
         self.overlay.configure(enable=timestamp)
         self.input.set_timeouts(5.0, 1.0)
         self.input.set_fallback(fallback)
+        if self.geo.fps != 60.0:
+            self.input.set_test_pattern_fps(self.geo.fps)          # the pattern is paced at the mode's own frame rate
         self.input.set_source(source)
         self.snap.set_buffer(self._snapbuf.phys)
         self.tavg.enable(False)                      # off until asked for; the buffer is set first

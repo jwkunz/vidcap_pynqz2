@@ -53,7 +53,7 @@ def dtd(m):
 
 
 def text_descriptor(tag, text):
-    return bytes([0, 0, 0, tag, 0]) + (text[:13] + "\n").ljust(13).encode("ascii")
+    return bytes([0, 0, 0, tag, 0]) + (text[:12] + "\n").ljust(13).encode("ascii")
 
 
 def build(name):
@@ -77,7 +77,8 @@ def build(name):
         e[38 + 2 * i:40 + 2 * i] = bytes([0x01, 0x01])
     e[54:72] = dtd(m)
     e[72:90] = text_descriptor(0xFC, f"vidcap {name}")
-    rng = bytearray([0, 0, 0, 0xFD, 0, 50, 70, max(1, int(hkhz) - 1), int(hkhz) + 2, int(float(m["PIXEL_MHZ"]) / 10) + 1, 0, 0x0A])
+    vmin, vmax = (50, 70) if hz >= 50 else (max(1, int(hz) - 5), int(hz) + 10)      # vertical rate limits must include the mode
+    rng = bytearray([0, 0, 0, 0xFD, 0, vmin, vmax, max(1, int(hkhz) - 1), int(hkhz) + 2, int(float(m["PIXEL_MHZ"]) / 10) + 1, 0, 0x0A])
     rng += bytes([0x20] * 6)
     e[90:108] = rng[:18]
     e[108:126] = text_descriptor(0xFF, "00000001")

@@ -159,7 +159,7 @@ module vc_input_sel #(
     reg [1:0]  state;
     reg        cur_tpg;
     reg [10:0] x;
-    reg [9:0]  y;
+    reg [10:0] y;
     reg [31:0] pace_cnt, stall_cnt;
 
     // Digilent dvi2rgb order is {R,B,G}; the pipeline order is {R,G,B}

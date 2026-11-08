@@ -351,5 +351,55 @@ class TestPanel(unittest.TestCase):
             panel.stop()
 
 
+class TestNotebooks(unittest.TestCase):
+    NB = os.path.join(os.path.dirname(__file__), "..", "..", "notebooks")
+
+    def _load(self, name):
+        import json
+        with open(os.path.join(self.NB, name)) as fh:
+            return json.load(fh)
+
+    def test_demo_notebook_grading_cells_run(self):
+        """The colour-grading cells of the demo notebook run against the fake hardware."""
+        import time as _time
+        nb = self._load("vidcap_demo.ipynb")
+        start = next(i for i, c in enumerate(nb["cells"]) if "".join(c["source"]).startswith("## Colour grading"))
+        end = next(i for i, c in enumerate(nb["cells"]) if "".join(c["source"]).startswith("## Test pattern"))
+        v, hw = _vidcap_with_lut()
+        v.start()
+        v.snapshot = lambda: np.random.default_rng(1).integers(0, 256, v.geo.shape, dtype=np.uint8)
+        saved_sleep, saved_cwd = _time.sleep, os.getcwd()
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            os.chdir(tmp)
+            _time.sleep = lambda s: None
+            try:
+                g = {"v": v, "time": _time}
+                import io, contextlib
+                with contextlib.redirect_stdout(io.StringIO()):
+                    for c in nb["cells"][start:end]:
+                        if c["cell_type"] == "code":
+                            exec("".join(c["source"]), g)
+                self.assertTrue(os.path.exists("warm.cube"))
+                with open("warm.cube") as fh:
+                    self.assertTrue((lut.parse_cube(fh.read()) == lut.build_look("warm")).all())
+            finally:
+                _time.sleep = saved_sleep
+                os.chdir(saved_cwd)
+        self.assertFalse(v.lut.enabled(), "the demo ends with grading off")
+
+    def test_both_notebooks_mention_grading_and_every_mode(self):
+        for name in ("vidcap_demo.ipynb", "vidcap_interactive.ipynb"):
+            text = "".join("".join(c["source"]) for c in self._load(name)["cells"])
+            self.assertIn("rading", text, name)
+            for mode in R.MODES:
+                self.assertIn(f"'{mode}'", text, f"{name} should list the {mode} mode")
+
+    def test_interactive_notebook_builds_the_panel_with_look_controls(self):
+        text = "".join("".join(c["source"]) for c in self._load("vidcap_interactive.ipynb")["cells"])
+        self.assertIn("ui.build_panel", text)
+        self.assertIn("Upload .cube", text)
+
+
 if __name__ == "__main__":
     unittest.main()

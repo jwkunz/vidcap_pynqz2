@@ -21,6 +21,7 @@ results = []
 
 
 W, H = R.WIDTH, R.HEIGHT
+FPS = 60.0
 
 
 def say(msg):
@@ -49,10 +50,11 @@ def bar_colours(img, rows):
 
 
 def main():
-    global W, H
+    global W, H, FPS
     mode = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("VIDCAP_MODE", R.DEFAULT_MODE)
     geo = R.MODES[mode]
     W, H = geo.width, geo.height
+    FPS = geo.fps
     say(f"== load the {mode} bitstream ({W}x{H})")
     t0 = time.time()
     v = Vidcap.on_pynq(mode=mode)
@@ -72,8 +74,8 @@ def main():
         a = (st["out_frames"], v.mux.frames())
         time.sleep(1.0)
         b = (v.input.status()["out_frames"], v.mux.frames())
-        check("input select emits frames at about 60 fps", 45 <= b[0] - a[0] <= 75, f"{b[0] - a[0]} frames in 1 s")
-        check("live reader delivers frames to the filter chain", 45 <= b[1] - a[1] <= 75, f"{b[1] - a[1]} frames in 1 s")
+        check(f"input select emits frames at about {FPS:g} fps", 0.75 * FPS <= b[0] - a[0] <= 1.25 * FPS, f"{b[0] - a[0]} frames in 1 s")
+        check("live reader delivers frames to the filter chain", 0.75 * FPS <= b[1] - a[1] <= 1.25 * FPS, f"{b[1] - a[1]} frames in 1 s")
 
         for name, ch in (("live S2MM", v.vdma_live.status("s2mm")), ("live MM2S", v.vdma_live.status("mm2s"))):
             check(f"VDMA {name} running without errors after start-up", not ch["halted"] and not ch["errors"],
@@ -114,7 +116,7 @@ def main():
         f0 = v.mux.frames()
         time.sleep(0.5)
         check("mux switched to video memory", v.mux.active() == "vmem", v.mux.active())
-        check("video-memory reader delivers frames", v.mux.frames() - f0 >= 20, f"{v.mux.frames() - f0} frames in 0.5 s")
+        check("video-memory reader delivers frames", v.mux.frames() - f0 >= 0.67 * FPS * 0.5, f"{v.mux.frames() - f0} frames in 0.5 s")
         st = v.vdma_vmem.status("mm2s")
         check("VDMA video memory running without errors", not st["halted"] and not st["errors"],
               f"halted={st['halted']} errors={st['errors']} raw=0x{st['raw']:08X}")
@@ -137,20 +139,21 @@ def main():
             time.sleep(0.2)
         a = v.input.status()["out_frames"]
         time.sleep(0.5)
-        check("video keeps flowing at full noise", v.input.status()["out_frames"] - a >= 20)
+        check("video keeps flowing at full noise", v.input.status()["out_frames"] - a >= 0.67 * FPS * 0.5)
         check("noise setting reads back", v.filter.noise() == 255 and v.filter.mode() == "noise")
         v.set_filter("passthrough")
 
         say("== temporal average (running sum in DDR)")
         v.input.set_source("test")                     # the colour bars are static, so the DDR contents are predictable
         time.sleep(0.5)
-        v.set_temporal_average(16)
-        time.sleep(1.2)                                # 16 frames fit in well under a second
+        N = min(16, v.history_frames)                  # 16, or the smaller default history of the big modes
+        v.set_temporal_average(N)
+        time.sleep(1.2 if v.geo.name != '1080p30' else 2.0)       # N frames fit in about a second
         st = v.tavg.status()
-        check("the average window fills to N=16", st["depth"] == 16, str(st))
+        check(f"the average window fills to N={N}", st["depth"] == N, str(st))
         a = v.input.status()["out_frames"]
         time.sleep(0.5)
-        check("video keeps flowing at about 60 fps with the average on", v.input.status()["out_frames"] - a >= 25,
+        check(f"video keeps flowing at about {FPS:g} fps with the average on", v.input.status()["out_frames"] - a >= 0.8 * FPS * 0.5,
               f"{v.input.status()['out_frames'] - a} frames in 0.5 s")
         for name, ch in (("live S2MM", v.vdma_live.status("s2mm")), ("live MM2S", v.vdma_live.status("mm2s"))):
             check(f"VDMA {name} still without errors", not ch["errors"], str(ch["errors"]))
@@ -164,10 +167,10 @@ def main():
         w8 = W // 8
         samples = [(y, i) for i in range(8) for y in range(8, H, 40)]      # the moving box covers well under 5%
         ring_ok = sum(all(int(ring[k, y, i * w8 + w8 // 2]) == bar_luma[i] for k in range(slots)) for y, i in samples)
-        sum_ok = sum(int(sums[y, i * w8 + w8 // 2]) == 16 * bar_luma[i] for y, i in samples)
-        check("history ring holds the brightness of the colour bars in all 16 slots", ring_ok >= 0.9 * len(samples),
+        sum_ok = sum(int(sums[y, i * w8 + w8 // 2]) == N * bar_luma[i] for y, i in samples)
+        check(f"history ring holds the brightness of the colour bars in all {slots} slots", ring_ok >= 0.9 * len(samples),
               f"{ring_ok} of {len(samples)} sampled pixels")
-        check("sum frame holds exactly 16 x brightness", sum_ok >= 0.9 * len(samples), f"{sum_ok} of {len(samples)} sampled pixels")
+        check(f"sum frame holds exactly {N} x brightness", sum_ok >= 0.9 * len(samples), f"{sum_ok} of {len(samples)} sampled pixels")
         v.set_temporal_average(4)                      # changing N restarts the window
         time.sleep(0.3)
         st = v.tavg.status()
@@ -230,10 +233,10 @@ def main():
             a = v.input.status()
             time.sleep(1.0)
             b = v.input.status()
-            check("HDMI frames arrive at about 60/s", 50 <= b["hdmi_frames"] - a["hdmi_frames"] <= 70,
+            check(f"HDMI frames arrive at about {FPS:g}/s", 0.83 * FPS <= b["hdmi_frames"] - a["hdmi_frames"] <= 1.17 * FPS,
                   f"{b['hdmi_frames'] - a['hdmi_frames']} frames in 1 s")
             check("HDMI is what is being shown", b["active_source"] == "hdmi" and not b["fallback_active"])
-            check("output runs at about 60 fps from HDMI", 50 <= b["out_frames"] - a["out_frames"] <= 70)
+            check(f"output runs at about {FPS:g} fps from HDMI", 0.83 * FPS <= b["out_frames"] - a["out_frames"] <= 1.17 * FPS)
         else:
             say("   fallback: HDMI selected with no signal connected")
             check("HDMI input reported not good while nothing is connected", not st["hdmi_good"], f"locked={st['hdmi_locked']}")
@@ -244,7 +247,7 @@ def main():
                   f"fallback={st['fallback_active']} source={st['active_source']}")
             a = v.input.status()["out_frames"]
             time.sleep(0.5)
-            check("output keeps running during fallback", v.input.status()["out_frames"] - a >= 20)
+            check("output keeps running during fallback", v.input.status()["out_frames"] - a >= 0.67 * FPS * 0.5)
 
         say("== final state")
         for k, val in v.status().items():

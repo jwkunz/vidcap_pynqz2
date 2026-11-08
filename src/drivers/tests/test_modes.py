@@ -60,12 +60,19 @@ class TestModeFiles(unittest.TestCase):
             self.assertTrue(w < int(d["H_SYNC_START"]) < int(d["H_SYNC_END"]) < int(d["H_FRAME"]), name)
             self.assertTrue(h < int(d["V_SYNC_START"]) < int(d["V_SYNC_END"]) < int(d["V_FRAME"]), name)
             hz = float(d["PIXEL_MHZ"]) * 1e6 / (int(d["H_FRAME"]) * int(d["V_FRAME"]))
-            self.assertTrue(59.5 < hz < 60.5, f"{name}: {hz:.2f} Hz")
+            want = {"1080p30": 30.0}.get(name, 60.0)
+            self.assertTrue(want - 0.5 < hz < want + 0.5, f"{name}: {hz:.2f} Hz")
 
     def test_known_cea_timings(self):
         d = load("480p")        # CEA-861 VIC 2/3: 858 x 525 total, sync 62 / 6
         self.assertEqual((d["H_FRAME"], d["V_FRAME"], int(d["H_SYNC_END"]) - int(d["H_SYNC_START"]),
                           int(d["V_SYNC_END"]) - int(d["V_SYNC_START"])), ("858", "525", 62, 6))
+        d = load("1080p30")     # CEA-861 VIC 34: 2200 x 1125 total, sync 44 / 5, positive
+        self.assertEqual((d["H_FRAME"], d["V_FRAME"], int(d["H_SYNC_END"]) - int(d["H_SYNC_START"]),
+                          int(d["V_SYNC_END"]) - int(d["V_SYNC_START"]), d["SYNC_POLARITY"]), ("2200", "1125", 44, 5, "High"))
+        d = load("xga")         # VESA DMT 0x10: 1344 x 806 total, sync 136 / 6, negative
+        self.assertEqual((d["H_FRAME"], d["V_FRAME"], int(d["H_SYNC_END"]) - int(d["H_SYNC_START"]),
+                          int(d["V_SYNC_END"]) - int(d["V_SYNC_START"]), d["SYNC_POLARITY"]), ("1344", "806", 136, 6, "Low"))
         d = load("240p")        # CEA-861 VIC 8/9 with pixel repetition: 1716 x 262 total, horizontal values doubled
         self.assertEqual((d["H_FRAME"], d["V_FRAME"], int(d["H_SYNC_END"]) - int(d["H_SYNC_START"]),
                           int(d["V_SYNC_END"]) - int(d["V_SYNC_START"])), ("1716", "262", 124, 3))
@@ -85,7 +92,7 @@ class TestEdid(unittest.TestCase):
         return dict(w=w, hb=hb, h=h, vb=vb, clk=clk, hfp=hfp, hsw=hsw, vfp=vfp, vsw=vsw)
 
     def test_generated_edids_are_valid_and_describe_their_mode(self):
-        for name in ("480p", "240p"):
+        for name in ("480p", "240p", "1080p30", "xga"):
             data, _ = gen_edid.build(name)
             self.assertEqual(len(data), 128)
             self.assertEqual(data[:8], bytes([0, 255, 255, 255, 255, 255, 255, 0]))
@@ -98,7 +105,9 @@ class TestEdid(unittest.TestCase):
             self.assertEqual(d["hfp"], int(m["H_SYNC_START"]) - int(m["WIDTH"]))
             self.assertEqual(d["hsw"], int(m["H_SYNC_END"]) - int(m["H_SYNC_START"]))
             self.assertEqual(d["vsw"], int(m["V_SYNC_END"]) - int(m["V_SYNC_START"]))
-            self.assertEqual(data[17 + 54] & 0x06, 0, "both syncs negative")
+            self.assertEqual(data[17 + 54] & 0x06, 0x06 if m["SYNC_POLARITY"] == "High" else 0, "sync polarity")
+            hz = d["clk"] / ((d["w"] + d["hb"]) * (d["h"] + d["vb"]))
+            self.assertTrue(data[90 + 5] <= hz <= data[90 + 6], f"{name}: vertical rate limits {data[95]}..{data[96]} Hz must include {hz:.1f}")
 
     def test_file_format_matches_the_stock_one(self):
         stock = os.path.join(ROOT, "workspace", "vivado", "refs", "PYNQ", "boards", "ip", "dvi2rgb_v1_7", "src", "720p_edid.data")
@@ -118,6 +127,28 @@ class TestEdid(unittest.TestCase):
 
 
 class TestDriverModes(unittest.TestCase):
+    def test_default_history_fits_the_memory_pool(self):
+        from vidcap.pipeline import default_history_frames
+        from vidcap.blocks import TemporalAverage
+        for name, g in R.MODES.items():
+            n = default_history_frames(g)
+            self.assertEqual(n, 16 if g.frame_bytes <= 3_000_000 else 8, name)
+            total = 6 * g.frame_bytes + TemporalAverage.bytes_needed(n, g)
+            self.assertLess(total, 68_000_000 - 8_000_000, f"{name}: {total / 1e6:.1f} MB must leave room in the ~68 MB free after boot")
+
+    def test_test_pattern_is_paced_at_the_modes_frame_rate(self):
+        v, mm = self._pipeline("1080p30")
+        v.start(sync_time=False)
+        self.assertEqual(mm["isel"].regs[R.ISEL_TPG_PERIOD], int(R.ACLK_HZ / 30.0))
+        v, mm = self._pipeline("720p")
+        v.start(sync_time=False)
+        self.assertNotIn(R.ISEL_TPG_PERIOD, mm["isel"].regs, "60 Hz modes keep the hardware default")
+
+    def test_start_uses_the_default_history_of_the_mode(self):
+        v, _ = self._pipeline("1080p30")
+        v.start(sync_time=False)
+        self.assertEqual(v.history_frames, 8)
+
     def _pipeline(self, mode):
         ids = {"rtc": {R.RTC_ID: R.RTC_MAGIC}, "isel": {R.ISEL_ID: R.ISEL_MAGIC}, "vmux": {R.VMUX_ID: R.VMUX_MAGIC}, "lut": {R.LUT_ID: R.LUT_MAGIC}}
         mm = {}

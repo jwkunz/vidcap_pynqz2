@@ -1,6 +1,6 @@
-# vidcap_pynqz2 - Requirements and design (v1.2.0)
+# vidcap_pynqz2 - Requirements and design (v1.3.0)
 
-Status: **v1.2.0.** Everything below is implemented and verified in simulation and by a timing-clean
+Status: **v1.3.0.** Everything below is implemented and verified in simulation and by a timing-clean
 Vivado build. It has also been run on a PYNQ-Z2 with the built-in test pattern as the only video source
 (section 5). **A real HDMI source and a monitor have not been tried.**
 
@@ -146,23 +146,25 @@ Control: PS → AXI-Lite → a register block on every core. Interrupts: AXI INT
 | OUT-1, 2 | `v_tc` (fixed 720p), `v_axi4s_vid_out`, `clk_wiz` (74.25 MHz exact) | timing-clean implementation |
 | OUT-3 | `vc_stream_mux`, `vc_input_sel` | `tb_vc_stream_mux`, `tb_vc_input_sel` |
 | TS-1..6 | `vc_rtc`, `vc_overlay` | `tb_vc_rtc` (14 checks: leap years, 1900/2000, rollovers, bad dates, CPS trim, power-up); `vc_overlay` C-sim + co-simulation |
-| SW-1, SW-2 | `src/drivers`, `docs/register_map.md` | 112 driver unit tests, including a check that every HLS register offset matches the generated headers |
+| SW-1, SW-2 | `src/drivers`, `docs/register_map.md` | 118 driver unit tests, including a check that every HLS register offset matches the generated headers |
 
 ## 5. Resources, timing and board results (Vivado 2025.2, xc7z020clg400-1)
 
-Implementation of v1.2.0 (with the noise mode, the temporal average and the colour-grading table), one bitstream per mode:
+Implementation of v1.3.0 (with the noise mode, the temporal average and the colour-grading table), one bitstream per mode:
 
 | Mode | LUTs | BRAM tiles | DSPs | Setup slack | Hold slack |
 |---|---|---|---|---|---|
-| 720p | 15,783 (30%) | 40.5 (29%) | 48 (22%) | +0.232 ns | +0.051 ns |
-| 480p | 15,753 (30%) | 34.5 (25%) | 50 (23%) | +0.550 ns | +0.013 ns |
-| 240p | 15,755 (30%) | 41.5 (30%) | 50 (23%) | +0.705 ns | +0.017 ns |
+| 720p | 15,786 (30%) | 40.5 (29%) | 48 (22%) | +0.835 ns | +0.027 ns |
+| 480p | 15,759 (30%) | 34.5 (25%) | 50 (23%) | +0.837 ns | +0.016 ns |
+| 240p | 15,775 (30%) | 41.5 (30%) | 50 (23%) | +0.554 ns | +0.020 ns |
+| XGA | 15,711 (30%) | 34.5 (25%) | 42 (19%) | +0.579 ns | +0.004 ns |
+| 1080p30 | 15,874 (30%) | 41.5 (30%) | 46 (21%) | +0.738 ns | +0.021 ns |
 
 The colour-grading core adds about 8 BRAM tiles and 21 DSPs. Reports are under `workspace/vivado/out_<mode>/` after `make overlay`. The temporal-average core is about 6.5k LUTs, 18 BRAM tiles and
 7 DSPs, and processes a frame in 9.46 ms. 
 The build **fails** if setup or hold timing is not met.
 
-**On the board** (`src/drivers/tests/hw_smoke.py <mode>`, test pattern as the source; v1.2.0: 43 of 43 checks pass in each of 720p, 480p and 240p; the earlier rows below were measured at 720p):
+**On the board** (`src/drivers/tests/hw_smoke.py <mode>`, test pattern as the source; v1.3.0 design: 43 of 43 checks pass in each of 720p, 480p, 240p, xga and 1080p30; the earlier rows below were measured at 720p):
 
 | Verified on hardware | Evidence |
 |---|---|

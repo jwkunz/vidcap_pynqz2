@@ -17,7 +17,7 @@ SHELL     := /bin/bash
 ROOT      := $(CURDIR)
 CORES_HLS := vc_filter vc_overlay vc_snapshot vc_tavg
 # video modes (src/overlay/modes/<mode>.env): each is its own bitstream, sized for its frame
-MODES     := 720p 480p 240p
+MODES     := 720p 480p 240p 1080p30 xga
 MODE      ?= 720p
 SIM       := src/cores/vc_common/run_xsim.sh
 HLS       := src/cores/vc_common/run_hls.sh
